@@ -1,0 +1,27 @@
+# Build artifacts
+obj/
+bin/
+*.o
+*.so
+*.a
+
+# Executables
+main
+sandbox-engine
+*.exe
+
+# Editor files
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Debug files
+*.dSYM/
+*.d
+
+# Core dumps
+core
+core.*
+
