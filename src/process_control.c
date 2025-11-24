@@ -1,5 +1,6 @@
 #include "process_control.h"
 #include "namespaces.h"
+#include "firewall.h"
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -11,9 +12,10 @@
 
 /**
  * Create a sandboxed subprocess with control over it
- * Sets up namespace isolation before executing the target program
+ * Sets up namespace isolation and firewall before executing the target program
  */
-pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *uts_hostname) {
+pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *uts_hostname,
+                                 FirewallPolicy firewall_policy, const char *policy_file) {
     pid_t pid;
     
     if (!file_path) {
@@ -72,6 +74,33 @@ pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *
             if (setup_uts_namespace(uts_hostname ? uts_hostname : "sandbox") < 0) {
                 fprintf(stderr, "Warning: UTS namespace setup failed\n");
             }
+        }
+        
+        /* Setup firewall */
+        if (firewall_policy != FIREWALL_DISABLED) {
+            printf("Initializing firewall with policy: %s\n", firewall_policy_name(firewall_policy));
+            
+            FirewallConfig *fw_config = firewall_init(firewall_policy);
+            if (!fw_config) {
+                fprintf(stderr, "Warning: Failed to initialize firewall\n");
+            } else {
+                /* Load custom policy file if provided */
+                if (policy_file && firewall_policy == FIREWALL_CUSTOM) {
+                    if (firewall_load_policy(fw_config, policy_file) < 0) {
+                        fprintf(stderr, "Warning: Failed to load custom policy from %s\n", policy_file);
+                    }
+                }
+                
+                /* Apply firewall rules */
+                if (firewall_apply(fw_config) < 0) {
+                    fprintf(stderr, "Warning: Failed to apply firewall rules\n");
+                }
+                
+                /* Note: We don't cleanup fw_config here as it needs to stay active
+                 * for the sandboxed process. It will be cleaned up when process exits */
+            }
+        } else {
+            printf("Firewall disabled - full network access granted\n");
         }
         
         /* Execute the selected file */

@@ -1,0 +1,8 @@
+# Strict Firewall Policy - Whitelist Only
+# Format: name,protocol,direction,action,ip,mask,port_start,port_end
+# Use '-' for no IP filtering
+
+# Allow only localhost communication
+Allow Localhost,ALL,BOTH,ALLOW,127.0.0.1,255.255.255.255,0,0
+
+# Deny everything else (implicit)

@@ -1,6 +1,8 @@
+#define _DEFAULT_SOURCE
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
+#include <time.h>
 
 volatile sig_atomic_t keep_running = 1;
 
@@ -19,12 +21,14 @@ int main() {
     printf("Use Stop Process button to terminate\n");
     
     int counter = 0;
+    struct timespec delay = {0, 1000000}; /* 1ms in nanoseconds */
+    
     while (keep_running) {
         counter++;
         if (counter % 1000000 == 0) {
             printf("Running... iteration %d\n", counter);
         }
-        usleep(1000); /* Small delay to prevent 100% CPU */
+        nanosleep(&delay, NULL); /* Small delay to prevent 100% CPU */
     }
     
     printf("Program terminated after %d iterations\n", counter);

@@ -1,0 +1,13 @@
+# Web-Only Firewall Policy - Only allow HTTP/HTTPS/DNS
+# Format: name,protocol,direction,action,ip,mask,port_start,port_end
+
+# Allow only web browsing
+Allow HTTP,TCP,OUTBOUND,ALLOW,-,-,80,80
+Allow HTTPS,TCP,OUTBOUND,ALLOW,-,-,443,443
+Allow DNS,UDP,OUTBOUND,ALLOW,-,-,53,53
+
+# Block all inbound connections
+Deny All Inbound,ALL,INBOUND,DENY,-,-,0,65535
+
+# Allow localhost
+Allow Localhost,ALL,BOTH,ALLOW,127.0.0.1,255.255.255.255,0,0

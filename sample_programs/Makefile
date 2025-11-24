@@ -2,7 +2,8 @@ CC = gcc
 CFLAGS = -Wall -Wextra -std=c11 -g -pthread
 
 PROGRAMS = hello cpu_intensive memory_test infinite_loop file_operations \
-           fork_bomb file_spammer memory_bomb cpu_abuse disk_filler resource_exhaustion
+           fork_bomb file_spammer memory_bomb cpu_abuse disk_filler resource_exhaustion \
+           network_test http_request dns_lookup port_scan
 
 .PHONY: all clean
 

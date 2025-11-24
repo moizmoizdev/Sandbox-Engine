@@ -1,0 +1,19 @@
+# Moderate Firewall Policy - Block dangerous ports, allow common services
+# Format: name,protocol,direction,action,ip,mask,port_start,port_end
+
+# Block dangerous/exploitable ports
+Block Telnet,TCP,BOTH,DENY,-,-,23,23
+Block FTP,TCP,BOTH,DENY,-,-,21,21
+Block SMB,TCP,BOTH,DENY,-,-,445,445
+Block RDP,TCP,BOTH,DENY,-,-,3389,3389
+Block MySQL,TCP,BOTH,DENY,-,-,3306,3306
+Block PostgreSQL,TCP,BOTH,DENY,-,-,5432,5432
+
+# Allow common outbound services
+Allow HTTP,TCP,OUTBOUND,ALLOW,-,-,80,80
+Allow HTTPS,TCP,OUTBOUND,ALLOW,-,-,443,443
+Allow DNS,UDP,OUTBOUND,ALLOW,-,-,53,53
+Allow NTP,UDP,OUTBOUND,ALLOW,-,-,123,123
+
+# Allow localhost
+Allow Localhost,ALL,BOTH,ALLOW,127.0.0.1,255.255.255.255,0,0

@@ -2,15 +2,19 @@
 #define PROCESS_CONTROL_H
 
 #include <sys/types.h>
+#include "firewall.h"
 
 /**
  * Create a sandboxed subprocess with control over it
  * @param file_path Path to the executable file to run
  * @param ns_flags Bitmask of namespaces to enable (NS_PID, NS_MOUNT, NS_NET, NS_UTS)
  * @param uts_hostname Hostname to set in UTS namespace (NULL for default "sandbox")
+ * @param firewall_policy Firewall policy to apply
+ * @param policy_file Custom policy file path (NULL for built-in policies)
  * @return Process ID of the created subprocess, or -1 on error
  */
-pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *uts_hostname);
+pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *uts_hostname,
+                                 FirewallPolicy firewall_policy, const char *policy_file);
 
 /**
  * Terminate a running process
