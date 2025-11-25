@@ -17,6 +17,7 @@
 #include "firewall.h"
 #include "cgroups.h"
 #include "monitor.h"
+#include "syscall_tracker.h"
 
 /* Application state structure */
 typedef struct {
@@ -72,6 +73,14 @@ typedef struct {
     GtkLabel *mon_fds_label;
     GtkLabel *mon_status_label;
     guint monitoring_timeout_id;
+    /* Syscall tracking */
+    SyscallTracker syscall_tracker;
+    GtkCheckButton *syscall_tracking_check;
+    GtkTextView *syscall_log_view;
+    GtkTextBuffer *syscall_log_buffer;
+    GtkTreeView *syscall_stats_tree;
+    GtkListStore *syscall_stats_store;
+    guint syscall_tracking_timeout_id;
     /* Log viewer */
     GtkTextView *log_view;
     GtkTextBuffer *log_buffer;
@@ -105,6 +114,12 @@ static void on_policy_chooser_response(GtkNativeDialog *dialog, gint response_id
 static void start_monitoring(AppState *state);
 static void stop_monitoring(AppState *state);
 static gboolean update_monitoring(gpointer user_data);
+/* Syscall tracking functions */
+static void start_syscall_tracking(AppState *state);
+static void stop_syscall_tracking(AppState *state);
+static gboolean update_syscall_tracking(gpointer user_data);
+static void refresh_syscall_logs(AppState *state);
+static void refresh_syscall_stats(AppState *state);
 static void setup_ui(AppState *state);
 static void cleanup_state(AppState *state);
 
@@ -278,6 +293,11 @@ static void on_run_clicked(GtkWidget *widget, gpointer user_data) {
     /* Start monitoring */
     start_monitoring(state);
     
+    /* Start syscall tracking if enabled */
+    if (gtk_check_button_get_active(state->syscall_tracking_check)) {
+        start_syscall_tracking(state);
+    }
+    
     /* Update UI state */
     gtk_widget_set_sensitive(GTK_WIDGET(state->select_file_btn), FALSE);
     gtk_widget_set_sensitive(GTK_WIDGET(state->run_btn), FALSE);
@@ -294,6 +314,9 @@ static void on_stop_clicked(GtkWidget *widget, gpointer user_data) {
     
     /* Stop monitoring */
     stop_monitoring(state);
+    
+    /* Stop syscall tracking */
+    stop_syscall_tracking(state);
     
     /* Terminate the sandboxed process */
     char log_msg[256];
@@ -827,6 +850,131 @@ static gboolean update_monitoring(gpointer user_data) {
     return G_SOURCE_CONTINUE;
 }
 
+/* Start syscall tracking */
+static void start_syscall_tracking(AppState *state) {
+    if (state->sandboxed_pid <= 0) {
+        return;
+    }
+    
+    char log_file[256];
+    snprintf(log_file, sizeof(log_file), "/tmp/sandbox_syscalls_%d.log", state->sandboxed_pid);
+    
+    if (syscall_tracker_init(&state->syscall_tracker, state->sandboxed_pid, log_file) == 0) {
+        if (syscall_tracker_start(&state->syscall_tracker) == 0) {
+            /* Start update timer (update every 100ms for real-time tracking) */
+            state->syscall_tracking_timeout_id = g_timeout_add(100, update_syscall_tracking, state);
+        } else {
+            /* Failed to start - might need root */
+            gtk_label_set_text(state->status_label, "Warning: Syscall tracking requires root privileges");
+            syscall_tracker_cleanup(&state->syscall_tracker);
+        }
+    }
+}
+
+/* Stop syscall tracking */
+static void stop_syscall_tracking(AppState *state) {
+    if (state->syscall_tracking_timeout_id > 0) {
+        g_source_remove(state->syscall_tracking_timeout_id);
+        state->syscall_tracking_timeout_id = 0;
+    }
+    
+    syscall_tracker_stop(&state->syscall_tracker);
+    syscall_tracker_cleanup(&state->syscall_tracker);
+}
+
+/* Update syscall tracking display */
+static gboolean update_syscall_tracking(gpointer user_data) {
+    AppState *state = (AppState *)user_data;
+    
+    if (!state->process_running || state->sandboxed_pid <= 0) {
+        return G_SOURCE_CONTINUE;
+    }
+    
+    /* Process syscall events */
+    syscall_tracker_process_event(&state->syscall_tracker);
+    
+    /* Refresh logs and stats periodically (every 10 updates = 1 second) */
+    static int update_counter = 0;
+    update_counter++;
+    if (update_counter >= 10) {
+        refresh_syscall_logs(state);
+        refresh_syscall_stats(state);
+        update_counter = 0;
+    }
+    
+    return G_SOURCE_CONTINUE;
+}
+
+/* Refresh syscall logs */
+static void refresh_syscall_logs(AppState *state) {
+    if (!state->syscall_log_buffer) {
+        return;
+    }
+    
+    SyscallLogEntry entries[100];
+    int count = syscall_tracker_get_logs(&state->syscall_tracker, entries, 100);
+    
+    if (count > 0) {
+        /* Get current text length */
+        GtkTextIter start, end;
+        gtk_text_buffer_get_bounds(state->syscall_log_buffer, &start, &end);
+        int current_length = gtk_text_iter_get_offset(&end);
+        
+        /* Only add new entries */
+        static int last_log_count = 0;
+        if (count > last_log_count) {
+            for (int i = last_log_count; i < count; i++) {
+                char log_line[512];
+                syscall_format_entry(&entries[i], log_line, sizeof(log_line));
+                
+                GtkTextIter iter;
+                gtk_text_buffer_get_end_iter(state->syscall_log_buffer, &iter);
+                gtk_text_buffer_insert(state->syscall_log_buffer, &iter, log_line, -1);
+                gtk_text_buffer_insert(state->syscall_log_buffer, &iter, "\n", -1);
+            }
+            
+            /* Auto-scroll to bottom */
+            GtkTextMark *mark = gtk_text_buffer_get_insert(state->syscall_log_buffer);
+            gtk_text_view_scroll_to_mark(state->syscall_log_view, mark, 0.0, TRUE, 0.0, 1.0);
+        }
+        
+        last_log_count = count;
+    }
+}
+
+/* Refresh syscall statistics */
+static void refresh_syscall_stats(AppState *state) {
+    if (!state->syscall_stats_store) {
+        return;
+    }
+    
+    SyscallStats stats[500];
+    int count = syscall_tracker_get_stats(&state->syscall_tracker, stats, 500);
+    
+    /* Clear existing stats */
+    gtk_list_store_clear(state->syscall_stats_store);
+    
+    /* Add stats */
+    for (int i = 0; i < count; i++) {
+        char success_rate[32];
+        if (stats[i].count > 0) {
+            double success = ((double)(stats[i].count - stats[i].error_count) / stats[i].count) * 100.0;
+            snprintf(success_rate, sizeof(success_rate), "%.1f%%", success);
+        } else {
+            strcpy(success_rate, "N/A");
+        }
+        
+        GtkTreeIter iter;
+        gtk_list_store_append(state->syscall_stats_store, &iter);
+        gtk_list_store_set(state->syscall_stats_store, &iter,
+            0, stats[i].syscall_name,
+            1, (guint)stats[i].count,
+            2, (guint)stats[i].error_count,
+            3, success_rate,
+            -1);
+    }
+}
+
 /* Setup UI components */
 static void setup_ui(AppState *state) {
     GtkWidget *box;
@@ -1076,6 +1224,89 @@ static void setup_ui(AppState *state) {
     
     gtk_notebook_append_page(notebook, mon_tab, gtk_label_new("Monitoring"));
     
+    /* Tab 4: Syscall Tracking */
+    GtkWidget *syscall_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_widget_set_margin_top(syscall_tab, 10);
+    gtk_widget_set_margin_bottom(syscall_tab, 10);
+    gtk_widget_set_margin_start(syscall_tab, 10);
+    gtk_widget_set_margin_end(syscall_tab, 10);
+    
+    /* Enable syscall tracking checkbox */
+    state->syscall_tracking_check = GTK_CHECK_BUTTON(gtk_check_button_new_with_label("Enable Syscall Tracking"));
+    gtk_check_button_set_active(state->syscall_tracking_check, FALSE);
+    gtk_box_append(GTK_BOX(syscall_tab), GTK_WIDGET(state->syscall_tracking_check));
+    
+    GtkWidget *syscall_info = gtk_label_new(
+        "Syscall tracking uses ptrace to intercept and log all system calls made by the sandboxed process.\n"
+        "⚠ Requires root privileges or CAP_SYS_PTRACE capability.\n"
+        "Note: Tracking may slow down the process significantly."
+    );
+    gtk_label_set_wrap(GTK_LABEL(syscall_info), TRUE);
+    gtk_widget_set_margin_start(syscall_info, 20);
+    gtk_widget_set_margin_top(syscall_info, 5);
+    gtk_box_append(GTK_BOX(syscall_tab), syscall_info);
+    
+    /* Syscall log viewer */
+    GtkWidget *syscall_log_label = gtk_label_new("Syscall Log:");
+    gtk_widget_set_margin_top(syscall_log_label, 10);
+    gtk_box_append(GTK_BOX(syscall_tab), syscall_log_label);
+    
+    GtkWidget *syscall_log_scrolled = gtk_scrolled_window_new();
+    gtk_widget_set_vexpand(syscall_log_scrolled, TRUE);
+    gtk_widget_set_size_request(syscall_log_scrolled, -1, 200);
+    
+    state->syscall_log_view = GTK_TEXT_VIEW(gtk_text_view_new());
+    gtk_text_view_set_editable(state->syscall_log_view, FALSE);
+    gtk_text_view_set_wrap_mode(state->syscall_log_view, GTK_WRAP_WORD);
+    gtk_text_view_set_monospace(state->syscall_log_view, TRUE);
+    state->syscall_log_buffer = gtk_text_view_get_buffer(state->syscall_log_view);
+    
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(syscall_log_scrolled), GTK_WIDGET(state->syscall_log_view));
+    gtk_box_append(GTK_BOX(syscall_tab), syscall_log_scrolled);
+    
+    /* Syscall statistics */
+    GtkWidget *syscall_stats_label = gtk_label_new("Syscall Statistics:");
+    gtk_widget_set_margin_top(syscall_stats_label, 10);
+    gtk_box_append(GTK_BOX(syscall_tab), syscall_stats_label);
+    
+    state->syscall_stats_store = gtk_list_store_new(4,
+        G_TYPE_STRING,  /* Syscall name */
+        G_TYPE_UINT,    /* Count */
+        G_TYPE_UINT,    /* Error count */
+        G_TYPE_STRING   /* Success rate */
+    );
+    
+    state->syscall_stats_tree = GTK_TREE_VIEW(gtk_tree_view_new_with_model(GTK_TREE_MODEL(state->syscall_stats_store)));
+    
+    GtkCellRenderer *sc_renderer;
+    GtkTreeViewColumn *sc_column;
+    
+    sc_renderer = gtk_cell_renderer_text_new();
+    sc_column = gtk_tree_view_column_new_with_attributes("Syscall", sc_renderer, "text", 0, NULL);
+    gtk_tree_view_column_set_sort_column_id(sc_column, 0);
+    gtk_tree_view_append_column(state->syscall_stats_tree, sc_column);
+    
+    sc_renderer = gtk_cell_renderer_text_new();
+    sc_column = gtk_tree_view_column_new_with_attributes("Count", sc_renderer, "text", 1, NULL);
+    gtk_tree_view_column_set_sort_column_id(sc_column, 1);
+    gtk_tree_view_append_column(state->syscall_stats_tree, sc_column);
+    
+    sc_renderer = gtk_cell_renderer_text_new();
+    sc_column = gtk_tree_view_column_new_with_attributes("Errors", sc_renderer, "text", 2, NULL);
+    gtk_tree_view_column_set_sort_column_id(sc_column, 2);
+    gtk_tree_view_append_column(state->syscall_stats_tree, sc_column);
+    
+    sc_renderer = gtk_cell_renderer_text_new();
+    sc_column = gtk_tree_view_column_new_with_attributes("Success Rate", sc_renderer, "text", 3, NULL);
+    gtk_tree_view_append_column(state->syscall_stats_tree, sc_column);
+    
+    GtkWidget *syscall_stats_scrolled = gtk_scrolled_window_new();
+    gtk_widget_set_size_request(syscall_stats_scrolled, -1, 150);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(syscall_stats_scrolled), GTK_WIDGET(state->syscall_stats_tree));
+    gtk_box_append(GTK_BOX(syscall_tab), syscall_stats_scrolled);
+    
+    gtk_notebook_append_page(notebook, syscall_tab, gtk_label_new("Syscalls"));
+    
     gtk_box_append(GTK_BOX(box), GTK_WIDGET(notebook));
     
     /* Firewall configuration section */
@@ -1290,6 +1521,10 @@ static void setup_ui(AppState *state) {
     state->selected_policy_file = NULL;
     state->firewall_config = NULL;
     
+    /* Initialize syscall tracker */
+    memset(&state->syscall_tracker, 0, sizeof(SyscallTracker));
+    state->syscall_tracking_timeout_id = 0;
+    
     /* Control buttons */
     button_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     gtk_box_append(GTK_BOX(box), button_box);
@@ -1375,6 +1610,9 @@ static void cleanup_state(AppState *state) {
         firewall_cleanup(state->firewall_config);
         state->firewall_config = NULL;
     }
+    
+    /* Cleanup syscall tracker */
+    stop_syscall_tracking(state);
 }
 
 /* Main entry point */
