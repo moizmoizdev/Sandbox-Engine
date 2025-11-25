@@ -8,6 +8,8 @@
 #include <signal.h>
 #include <errno.h>
 #include <string.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 
 #include "sandbox.h"
 #include "process_control.h"
@@ -40,7 +42,22 @@ typedef struct {
     GtkCheckButton *firewall_enabled_check;
     GtkComboBoxText *firewall_policy_combo;
     GtkButton *firewall_load_policy_btn;
+    GtkButton *firewall_save_policy_btn;
     GtkLabel *firewall_status_label;
+    /* Firewall rule configuration */
+    GtkTreeView *firewall_rules_tree;
+    GtkListStore *firewall_rules_store;
+    GtkEntry *fw_rule_name_entry;
+    GtkComboBoxText *fw_rule_protocol_combo;
+    GtkComboBoxText *fw_rule_direction_combo;
+    GtkComboBoxText *fw_rule_action_combo;
+    GtkEntry *fw_rule_ip_entry;
+    GtkEntry *fw_rule_mask_entry;
+    GtkSpinButton *fw_rule_port_start_spin;
+    GtkSpinButton *fw_rule_port_end_spin;
+    GtkButton *fw_rule_add_btn;
+    GtkButton *fw_rule_remove_btn;
+    FirewallConfig *firewall_config; /* Store custom rules */
     /* Cgroup configuration */
     GtkCheckButton *cg_enabled_check;
     GtkSpinButton *cg_cpu_spin;
@@ -74,6 +91,12 @@ static void on_stop_clicked(GtkWidget *widget, gpointer user_data);
 /* Firewall callbacks */
 static void on_firewall_policy_changed(GtkWidget *widget, gpointer user_data);
 static void on_load_firewall_policy(GtkWidget *widget, gpointer user_data);
+static void on_save_firewall_policy(GtkWidget *widget, gpointer user_data);
+static void on_add_firewall_rule(GtkWidget *widget, gpointer user_data);
+static void on_remove_firewall_rule(GtkWidget *widget, gpointer user_data);
+static void refresh_firewall_rules_list(AppState *state);
+static void on_policy_chooser_response(GtkNativeDialog *dialog, gint response_id, gpointer user_data);
+static void on_save_policy_chooser_response(GtkNativeDialog *dialog, gint response_id, gpointer user_data);
 /* Log functions */
 static void append_log(AppState *state, const char *message);
 static gboolean update_logs(gpointer user_data);
@@ -199,10 +222,32 @@ static void on_run_clicked(GtkWidget *widget, gpointer user_data) {
         }
     }
     
+    /* Save custom firewall rules to temp file if configured */
+    char *temp_policy_file = NULL;
+    if (state->firewall_config && 
+        (state->firewall_policy == FIREWALL_CUSTOM || 
+         state->firewall_policy == FIREWALL_STRICT ||
+         state->firewall_config->rule_count > 0)) {
+        /* Save to temp file */
+        temp_policy_file = g_strdup("/tmp/sandbox_firewall_policy.policy");
+        if (firewall_save_policy(state->firewall_config, temp_policy_file) < 0) {
+            g_free(temp_policy_file);
+            temp_policy_file = NULL;
+        }
+    }
+    
+    /* Use temp policy file if we created one, otherwise use selected file */
+    const char *policy_file_to_use = temp_policy_file ? temp_policy_file : state->selected_policy_file;
+    
     /* Create sandboxed process with namespace, firewall, and cgroup configuration */
     pid_t pid = create_sandboxed_process(state->selected_file, ns_flags, uts_hostname,
-                                         state->firewall_policy, state->selected_policy_file,
+                                         state->firewall_policy, policy_file_to_use,
                                          cg_config_ptr);
+    
+    /* Cleanup temp file */
+    if (temp_policy_file) {
+        g_free(temp_policy_file);
+    }
     
     /* Cleanup cgroup config if process creation failed */
     if (pid < 0 && cg_config_ptr) {
@@ -296,22 +341,54 @@ static void on_firewall_policy_changed(GtkWidget *widget, gpointer user_data) {
         state->firewall_policy = FIREWALL_DISABLED;
         gtk_label_set_text(state->firewall_status_label, "Firewall: Disabled");
         gtk_widget_set_sensitive(GTK_WIDGET(state->firewall_load_policy_btn), FALSE);
+        gtk_widget_set_sensitive(GTK_WIDGET(state->firewall_save_policy_btn), FALSE);
+        /* Cleanup config if exists */
+        if (state->firewall_config) {
+            firewall_cleanup(state->firewall_config);
+            state->firewall_config = NULL;
+            refresh_firewall_rules_list(state);
+        }
     } else if (strcmp(policy_text, "No Network") == 0) {
         state->firewall_policy = FIREWALL_NO_NETWORK;
         gtk_label_set_text(state->firewall_status_label, "Firewall: Complete Network Isolation");
         gtk_widget_set_sensitive(GTK_WIDGET(state->firewall_load_policy_btn), FALSE);
+        gtk_widget_set_sensitive(GTK_WIDGET(state->firewall_save_policy_btn), FALSE);
+        /* Cleanup config if exists */
+        if (state->firewall_config) {
+            firewall_cleanup(state->firewall_config);
+            state->firewall_config = NULL;
+            refresh_firewall_rules_list(state);
+        }
     } else if (strcmp(policy_text, "Strict") == 0) {
         state->firewall_policy = FIREWALL_STRICT;
         gtk_label_set_text(state->firewall_status_label, "Firewall: Strict (Whitelist Only)");
         gtk_widget_set_sensitive(GTK_WIDGET(state->firewall_load_policy_btn), TRUE);
+        gtk_widget_set_sensitive(GTK_WIDGET(state->firewall_save_policy_btn), TRUE);
+        /* Initialize config if not exists */
+        if (!state->firewall_config) {
+            state->firewall_config = firewall_init(FIREWALL_STRICT);
+            refresh_firewall_rules_list(state);
+        }
     } else if (strcmp(policy_text, "Moderate") == 0) {
         state->firewall_policy = FIREWALL_MODERATE;
         gtk_label_set_text(state->firewall_status_label, "Firewall: Moderate (Block Dangerous Ports)");
         gtk_widget_set_sensitive(GTK_WIDGET(state->firewall_load_policy_btn), TRUE);
+        gtk_widget_set_sensitive(GTK_WIDGET(state->firewall_save_policy_btn), TRUE);
+        /* Initialize config if not exists */
+        if (!state->firewall_config) {
+            state->firewall_config = firewall_init(FIREWALL_MODERATE);
+            refresh_firewall_rules_list(state);
+        }
     } else if (strcmp(policy_text, "Custom") == 0) {
         state->firewall_policy = FIREWALL_CUSTOM;
         gtk_label_set_text(state->firewall_status_label, "Firewall: Custom Policy Required");
         gtk_widget_set_sensitive(GTK_WIDGET(state->firewall_load_policy_btn), TRUE);
+        gtk_widget_set_sensitive(GTK_WIDGET(state->firewall_save_policy_btn), TRUE);
+        /* Initialize config if not exists */
+        if (!state->firewall_config) {
+            state->firewall_config = firewall_init(FIREWALL_CUSTOM);
+            refresh_firewall_rules_list(state);
+        }
     }
     
     g_free((void*)policy_text);
@@ -324,16 +401,31 @@ static void on_policy_chooser_response(GtkNativeDialog *dialog, gint response_id
     if (response_id == GTK_RESPONSE_ACCEPT) {
         GtkFileChooser *chooser = GTK_FILE_CHOOSER(dialog);
         GFile *file = gtk_file_chooser_get_file(chooser);
+        char *file_path = g_file_get_path(file);
         
         if (state->selected_policy_file) {
             g_free(state->selected_policy_file);
         }
         
-        state->selected_policy_file = g_file_get_path(file);
+        state->selected_policy_file = file_path;
         
-        char status_msg[256];
-        snprintf(status_msg, sizeof(status_msg), "Policy loaded: %s", state->selected_policy_file);
-        gtk_label_set_text(state->firewall_status_label, status_msg);
+        /* Load policy into firewall config */
+        if (!state->firewall_config) {
+            state->firewall_config = firewall_init(state->firewall_policy);
+        }
+        
+        if (firewall_load_policy(state->firewall_config, file_path) == 0) {
+            char status_msg[256];
+            snprintf(status_msg, sizeof(status_msg), "Policy loaded: %s", file_path);
+            gtk_label_set_text(state->firewall_status_label, status_msg);
+            append_log(state, "Firewall policy loaded successfully\n");
+            
+            /* Refresh rules list */
+            refresh_firewall_rules_list(state);
+        } else {
+            gtk_label_set_text(state->firewall_status_label, "Error: Failed to load policy");
+            append_log(state, "ERROR: Failed to load firewall policy\n");
+        }
         
         g_object_unref(file);
     }
@@ -362,6 +454,260 @@ static void on_load_firewall_policy(GtkWidget *widget, gpointer user_data) {
 
     g_signal_connect(dialog, "response", G_CALLBACK(on_policy_chooser_response), state);
     gtk_native_dialog_show(GTK_NATIVE_DIALOG(dialog));
+}
+
+/* Save firewall policy button callback */
+static void on_save_firewall_policy(GtkWidget *widget, gpointer user_data) {
+    AppState *state = (AppState *)user_data;
+    GtkFileChooserNative *dialog;
+    GtkFileChooserAction action = GTK_FILE_CHOOSER_ACTION_SAVE;
+
+    dialog = gtk_file_chooser_native_new("Save Firewall Policy File",
+                                         GTK_WINDOW(state->window),
+                                         action,
+                                         "_Save",
+                                         "_Cancel");
+    
+    /* Add file filter for .policy files */
+    GtkFileFilter *filter = gtk_file_filter_new();
+    gtk_file_filter_set_name(filter, "Policy Files");
+    gtk_file_filter_add_pattern(filter, "*.policy");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
+
+    g_signal_connect(dialog, "response", G_CALLBACK(on_save_policy_chooser_response), state);
+    gtk_native_dialog_show(GTK_NATIVE_DIALOG(dialog));
+}
+
+/* Save policy file chooser response callback */
+static void on_save_policy_chooser_response(GtkNativeDialog *dialog, gint response_id, gpointer user_data) {
+    AppState *state = (AppState *)user_data;
+    
+    if (response_id == GTK_RESPONSE_ACCEPT) {
+        GtkFileChooser *chooser = GTK_FILE_CHOOSER(dialog);
+        GFile *file = gtk_file_chooser_get_file(chooser);
+        char *file_path = g_file_get_path(file);
+        
+        if (state->firewall_config) {
+            if (firewall_save_policy(state->firewall_config, file_path) == 0) {
+                char status_msg[256];
+                snprintf(status_msg, sizeof(status_msg), "Policy saved to: %s", file_path);
+                gtk_label_set_text(state->firewall_status_label, status_msg);
+                append_log(state, "Firewall policy saved successfully\n");
+            } else {
+                gtk_label_set_text(state->firewall_status_label, "Error: Failed to save policy");
+                append_log(state, "ERROR: Failed to save firewall policy\n");
+            }
+        } else {
+            /* Create a temporary config and save */
+            FirewallConfig *temp_config = firewall_init(state->firewall_policy);
+            if (temp_config) {
+                /* Add rules from list store */
+                GtkTreeIter iter;
+                gboolean valid = gtk_tree_model_get_iter_first(GTK_TREE_MODEL(state->firewall_rules_store), &iter);
+                while (valid) {
+                    char *name, *proto_str, *dir_str, *act_str, *ip_str;
+                    int port_start, port_end;
+                    
+                    gtk_tree_model_get(GTK_TREE_MODEL(state->firewall_rules_store), &iter,
+                        0, &name, 1, &proto_str, 2, &dir_str, 3, &act_str,
+                        4, &ip_str, 5, &port_start, 6, &port_end, -1);
+                    
+                    NetworkProtocol protocol = PROTO_ALL;
+                    if (strcmp(proto_str, "TCP") == 0) protocol = PROTO_TCP;
+                    else if (strcmp(proto_str, "UDP") == 0) protocol = PROTO_UDP;
+                    else if (strcmp(proto_str, "ICMP") == 0) protocol = PROTO_ICMP;
+                    
+                    TrafficDirection direction = DIR_BOTH;
+                    if (strcmp(dir_str, "INBOUND") == 0) direction = DIR_INBOUND;
+                    else if (strcmp(dir_str, "OUTBOUND") == 0) direction = DIR_OUTBOUND;
+                    
+                    RuleAction action = ACTION_ALLOW;
+                    if (strcmp(act_str, "DENY") == 0) action = ACTION_DENY;
+                    else if (strcmp(act_str, "LOG") == 0) action = ACTION_LOG;
+                    
+                    const char *ip_ptr = (ip_str && strlen(ip_str) > 0) ? ip_str : NULL;
+                    FirewallRule rule = firewall_create_rule(name, protocol, direction, action,
+                                                             ip_ptr, NULL, port_start, port_end);
+                    firewall_add_rule(temp_config, &rule);
+                    
+                    g_free(name);
+                    g_free(proto_str);
+                    g_free(dir_str);
+                    g_free(act_str);
+                    g_free(ip_str);
+                    
+                    valid = gtk_tree_model_iter_next(GTK_TREE_MODEL(state->firewall_rules_store), &iter);
+                }
+                
+                if (firewall_save_policy(temp_config, file_path) == 0) {
+                    char status_msg[256];
+                    snprintf(status_msg, sizeof(status_msg), "Policy saved to: %s", file_path);
+                    gtk_label_set_text(state->firewall_status_label, status_msg);
+                    append_log(state, "Firewall policy saved successfully\n");
+                }
+                firewall_cleanup(temp_config);
+            }
+        }
+        
+        g_free(file_path);
+        g_object_unref(file);
+    }
+    
+    gtk_native_dialog_destroy(dialog);
+    g_object_unref(dialog);
+}
+
+/* Add firewall rule callback */
+static void on_add_firewall_rule(GtkWidget *widget, gpointer user_data) {
+    AppState *state = (AppState *)user_data;
+    
+    const char *name = gtk_editable_get_text(GTK_EDITABLE(state->fw_rule_name_entry));
+    if (!name || strlen(name) == 0) {
+        gtk_label_set_text(state->firewall_status_label, "Error: Rule name required");
+        return;
+    }
+    
+    const char *proto_text = gtk_combo_box_text_get_active_text(state->fw_rule_protocol_combo);
+    const char *dir_text = gtk_combo_box_text_get_active_text(state->fw_rule_direction_combo);
+    const char *act_text = gtk_combo_box_text_get_active_text(state->fw_rule_action_combo);
+    
+    const char *ip_text = gtk_editable_get_text(GTK_EDITABLE(state->fw_rule_ip_entry));
+    const char *mask_text = gtk_editable_get_text(GTK_EDITABLE(state->fw_rule_mask_entry));
+    int port_start = gtk_spin_button_get_value_as_int(state->fw_rule_port_start_spin);
+    int port_end = gtk_spin_button_get_value_as_int(state->fw_rule_port_end_spin);
+    
+    if (port_end == 0) port_end = port_start;
+    
+    /* Add to list store */
+    GtkTreeIter iter;
+    gtk_list_store_append(state->firewall_rules_store, &iter);
+    gtk_list_store_set(state->firewall_rules_store, &iter,
+        0, name,
+        1, proto_text ? proto_text : "ALL",
+        2, dir_text ? dir_text : "BOTH",
+        3, act_text ? act_text : "ALLOW",
+        4, ip_text && strlen(ip_text) > 0 ? ip_text : "-",
+        5, port_start,
+        6, port_end,
+        -1);
+    
+    /* Clear form */
+    gtk_editable_set_text(GTK_EDITABLE(state->fw_rule_name_entry), "");
+    gtk_editable_set_text(GTK_EDITABLE(state->fw_rule_ip_entry), "");
+    gtk_editable_set_text(GTK_EDITABLE(state->fw_rule_mask_entry), "");
+    gtk_spin_button_set_value(state->fw_rule_port_start_spin, 0);
+    gtk_spin_button_set_value(state->fw_rule_port_end_spin, 0);
+    
+    g_free((void*)proto_text);
+    g_free((void*)dir_text);
+    g_free((void*)act_text);
+    
+    /* Update firewall config */
+    if (!state->firewall_config) {
+        state->firewall_config = firewall_init(state->firewall_policy);
+    }
+    
+    NetworkProtocol protocol = PROTO_ALL;
+    if (proto_text && strcmp(proto_text, "TCP") == 0) protocol = PROTO_TCP;
+    else if (proto_text && strcmp(proto_text, "UDP") == 0) protocol = PROTO_UDP;
+    else if (proto_text && strcmp(proto_text, "ICMP") == 0) protocol = PROTO_ICMP;
+    
+    TrafficDirection direction = DIR_BOTH;
+    if (dir_text && strcmp(dir_text, "INBOUND") == 0) direction = DIR_INBOUND;
+    else if (dir_text && strcmp(dir_text, "OUTBOUND") == 0) direction = DIR_OUTBOUND;
+    
+    RuleAction action = ACTION_ALLOW;
+    if (act_text && strcmp(act_text, "DENY") == 0) action = ACTION_DENY;
+    else if (act_text && strcmp(act_text, "LOG") == 0) action = ACTION_LOG;
+    
+    const char *ip_ptr = (ip_text && strlen(ip_text) > 0) ? ip_text : NULL;
+    const char *mask_ptr = (mask_text && strlen(mask_text) > 0) ? mask_text : NULL;
+    
+    FirewallRule rule = firewall_create_rule(name, protocol, direction, action,
+                                             ip_ptr, mask_ptr, port_start, port_end);
+    firewall_add_rule(state->firewall_config, &rule);
+    
+    gtk_label_set_text(state->firewall_status_label, "Rule added successfully");
+}
+
+/* Remove firewall rule callback */
+static void on_remove_firewall_rule(GtkWidget *widget, gpointer user_data) {
+    AppState *state = (AppState *)user_data;
+    
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(state->firewall_rules_tree);
+    GtkTreeModel *model;
+    GtkTreeIter iter;
+    
+    if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
+        int index = 0;
+        GtkTreePath *path = gtk_tree_model_get_path(model, &iter);
+        int *indices = gtk_tree_path_get_indices(path);
+        if (indices) {
+            index = indices[0];
+        }
+        gtk_tree_path_free(path);
+        
+        /* Remove from list store */
+        gtk_list_store_remove(state->firewall_rules_store, &iter);
+        
+        /* Remove from firewall config */
+        if (state->firewall_config && index < state->firewall_config->rule_count) {
+            firewall_remove_rule(state->firewall_config, index);
+        }
+        
+        gtk_label_set_text(state->firewall_status_label, "Rule removed");
+    } else {
+        gtk_label_set_text(state->firewall_status_label, "No rule selected");
+    }
+}
+
+/* Refresh firewall rules list */
+static void refresh_firewall_rules_list(AppState *state) {
+    gtk_list_store_clear(state->firewall_rules_store);
+    
+    if (state->firewall_config) {
+        for (int i = 0; i < state->firewall_config->rule_count; i++) {
+            FirewallRule *rule = &state->firewall_config->rules[i];
+            if (!rule->enabled) continue;
+            
+            const char *proto = "ALL";
+            if (rule->protocol == PROTO_TCP) proto = "TCP";
+            else if (rule->protocol == PROTO_UDP) proto = "UDP";
+            else if (rule->protocol == PROTO_ICMP) proto = "ICMP";
+            
+            const char *dir = "BOTH";
+            if (rule->direction == DIR_INBOUND) dir = "INBOUND";
+            else if (rule->direction == DIR_OUTBOUND) dir = "OUTBOUND";
+            
+            const char *action = "ALLOW";
+            if (rule->action == ACTION_DENY) action = "DENY";
+            else if (rule->action == ACTION_LOG) action = "LOG";
+            
+            char ip_str[32] = "-";
+            if (rule->has_ip_filter) {
+                inet_ntop(AF_INET, &rule->ip_addr, ip_str, sizeof(ip_str));
+            }
+            
+            char port_str[32];
+            if (rule->port_start == rule->port_end) {
+                snprintf(port_str, sizeof(port_str), "%d", rule->port_start);
+            } else {
+                snprintf(port_str, sizeof(port_str), "%d-%d", rule->port_start, rule->port_end);
+            }
+            
+            GtkTreeIter iter;
+            gtk_list_store_append(state->firewall_rules_store, &iter);
+            gtk_list_store_set(state->firewall_rules_store, &iter,
+                0, rule->name,
+                1, proto,
+                2, dir,
+                3, action,
+                4, ip_str,
+                5, rule->port_start,
+                6, rule->port_end,
+                -1);
+        }
+    }
 }
 
 /* Append log message to the log viewer */
@@ -761,7 +1107,161 @@ static void setup_ui(AppState *state) {
                      G_CALLBACK(on_load_firewall_policy), state);
     gtk_box_append(GTK_BOX(firewall_controls), GTK_WIDGET(state->firewall_load_policy_btn));
     
+    /* Save policy file button */
+    state->firewall_save_policy_btn = GTK_BUTTON(gtk_button_new_with_label("Save Policy File"));
+    g_signal_connect(state->firewall_save_policy_btn, "clicked",
+                     G_CALLBACK(on_save_firewall_policy), state);
+    gtk_box_append(GTK_BOX(firewall_controls), GTK_WIDGET(state->firewall_save_policy_btn));
+    
     gtk_box_append(GTK_BOX(firewall_section), firewall_controls);
+    
+    /* Firewall rules configuration (expandable section) */
+    GtkExpander *fw_rules_expander = GTK_EXPANDER(gtk_expander_new_with_mnemonic("_Configure Custom Rules"));
+    GtkWidget *fw_rules_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_widget_set_margin_start(fw_rules_box, 20);
+    gtk_widget_set_margin_top(fw_rules_box, 10);
+    
+    /* Rules list */
+    GtkWidget *rules_label = gtk_label_new("Firewall Rules:");
+    gtk_box_append(GTK_BOX(fw_rules_box), rules_label);
+    
+    /* Create list store for rules */
+    state->firewall_rules_store = gtk_list_store_new(7, 
+        G_TYPE_STRING,  /* Name */
+        G_TYPE_STRING,  /* Protocol */
+        G_TYPE_STRING,  /* Direction */
+        G_TYPE_STRING,  /* Action */
+        G_TYPE_STRING,  /* IP */
+        G_TYPE_INT,     /* Port Start */
+        G_TYPE_INT      /* Port End */
+    );
+    
+    /* Create tree view */
+    state->firewall_rules_tree = GTK_TREE_VIEW(gtk_tree_view_new_with_model(GTK_TREE_MODEL(state->firewall_rules_store)));
+    
+    /* Add columns */
+    GtkCellRenderer *renderer;
+    GtkTreeViewColumn *column;
+    
+    renderer = gtk_cell_renderer_text_new();
+    column = gtk_tree_view_column_new_with_attributes("Name", renderer, "text", 0, NULL);
+    gtk_tree_view_append_column(state->firewall_rules_tree, column);
+    
+    renderer = gtk_cell_renderer_text_new();
+    column = gtk_tree_view_column_new_with_attributes("Protocol", renderer, "text", 1, NULL);
+    gtk_tree_view_append_column(state->firewall_rules_tree, column);
+    
+    renderer = gtk_cell_renderer_text_new();
+    column = gtk_tree_view_column_new_with_attributes("Direction", renderer, "text", 2, NULL);
+    gtk_tree_view_append_column(state->firewall_rules_tree, column);
+    
+    renderer = gtk_cell_renderer_text_new();
+    column = gtk_tree_view_column_new_with_attributes("Action", renderer, "text", 3, NULL);
+    gtk_tree_view_append_column(state->firewall_rules_tree, column);
+    
+    renderer = gtk_cell_renderer_text_new();
+    column = gtk_tree_view_column_new_with_attributes("IP", renderer, "text", 4, NULL);
+    gtk_tree_view_append_column(state->firewall_rules_tree, column);
+    
+    renderer = gtk_cell_renderer_text_new();
+    column = gtk_tree_view_column_new_with_attributes("Ports", renderer, "text", 5, NULL);
+    gtk_tree_view_append_column(state->firewall_rules_tree, column);
+    
+    /* Scrolled window for rules list */
+    GtkWidget *rules_scrolled = gtk_scrolled_window_new();
+    gtk_widget_set_size_request(rules_scrolled, -1, 150);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(rules_scrolled), GTK_WIDGET(state->firewall_rules_tree));
+    gtk_box_append(GTK_BOX(fw_rules_box), rules_scrolled);
+    
+    /* Rule input form */
+    GtkWidget *rule_form = gtk_grid_new();
+    gtk_grid_set_column_spacing(GTK_GRID(rule_form), 10);
+    gtk_grid_set_row_spacing(GTK_GRID(rule_form), 5);
+    
+    /* Rule name */
+    GtkWidget *name_label = gtk_label_new("Rule Name:");
+    gtk_grid_attach(GTK_GRID(rule_form), name_label, 0, 0, 1, 1);
+    state->fw_rule_name_entry = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_placeholder_text(state->fw_rule_name_entry, "e.g., Allow HTTP");
+    gtk_grid_attach(GTK_GRID(rule_form), GTK_WIDGET(state->fw_rule_name_entry), 1, 0, 1, 1);
+    
+    /* Protocol */
+    GtkWidget *proto_label = gtk_label_new("Protocol:");
+    gtk_grid_attach(GTK_GRID(rule_form), proto_label, 0, 1, 1, 1);
+    state->fw_rule_protocol_combo = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
+    gtk_combo_box_text_append_text(state->fw_rule_protocol_combo, "ALL");
+    gtk_combo_box_text_append_text(state->fw_rule_protocol_combo, "TCP");
+    gtk_combo_box_text_append_text(state->fw_rule_protocol_combo, "UDP");
+    gtk_combo_box_text_append_text(state->fw_rule_protocol_combo, "ICMP");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(state->fw_rule_protocol_combo), 1); /* Default TCP */
+    gtk_grid_attach(GTK_GRID(rule_form), GTK_WIDGET(state->fw_rule_protocol_combo), 1, 1, 1, 1);
+    
+    /* Direction */
+    GtkWidget *dir_label = gtk_label_new("Direction:");
+    gtk_grid_attach(GTK_GRID(rule_form), dir_label, 2, 1, 1, 1);
+    state->fw_rule_direction_combo = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
+    gtk_combo_box_text_append_text(state->fw_rule_direction_combo, "BOTH");
+    gtk_combo_box_text_append_text(state->fw_rule_direction_combo, "INBOUND");
+    gtk_combo_box_text_append_text(state->fw_rule_direction_combo, "OUTBOUND");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(state->fw_rule_direction_combo), 0); /* Default BOTH */
+    gtk_grid_attach(GTK_GRID(rule_form), GTK_WIDGET(state->fw_rule_direction_combo), 3, 1, 1, 1);
+    
+    /* Action */
+    GtkWidget *action_label = gtk_label_new("Action:");
+    gtk_grid_attach(GTK_GRID(rule_form), action_label, 0, 2, 1, 1);
+    state->fw_rule_action_combo = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
+    gtk_combo_box_text_append_text(state->fw_rule_action_combo, "ALLOW");
+    gtk_combo_box_text_append_text(state->fw_rule_action_combo, "DENY");
+    gtk_combo_box_text_append_text(state->fw_rule_action_combo, "LOG");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(state->fw_rule_action_combo), 0); /* Default ALLOW */
+    gtk_grid_attach(GTK_GRID(rule_form), GTK_WIDGET(state->fw_rule_action_combo), 1, 2, 1, 1);
+    
+    /* IP Address */
+    GtkWidget *ip_label = gtk_label_new("IP Address:");
+    gtk_grid_attach(GTK_GRID(rule_form), ip_label, 2, 2, 1, 1);
+    state->fw_rule_ip_entry = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_placeholder_text(state->fw_rule_ip_entry, "0.0.0.0 (any)");
+    gtk_grid_attach(GTK_GRID(rule_form), GTK_WIDGET(state->fw_rule_ip_entry), 3, 2, 1, 1);
+    
+    /* Netmask */
+    GtkWidget *mask_label = gtk_label_new("Netmask:");
+    gtk_grid_attach(GTK_GRID(rule_form), mask_label, 0, 3, 1, 1);
+    state->fw_rule_mask_entry = GTK_ENTRY(gtk_entry_new());
+    gtk_entry_set_placeholder_text(state->fw_rule_mask_entry, "255.255.255.255");
+    gtk_grid_attach(GTK_GRID(rule_form), GTK_WIDGET(state->fw_rule_mask_entry), 1, 3, 1, 1);
+    
+    /* Port Start */
+    GtkWidget *port_start_label = gtk_label_new("Port Start:");
+    gtk_grid_attach(GTK_GRID(rule_form), port_start_label, 2, 3, 1, 1);
+    state->fw_rule_port_start_spin = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(0, 65535, 1));
+    gtk_spin_button_set_value(state->fw_rule_port_start_spin, 0);
+    gtk_grid_attach(GTK_GRID(rule_form), GTK_WIDGET(state->fw_rule_port_start_spin), 3, 3, 1, 1);
+    
+    /* Port End */
+    GtkWidget *port_end_label = gtk_label_new("Port End:");
+    gtk_grid_attach(GTK_GRID(rule_form), port_end_label, 0, 4, 1, 1);
+    state->fw_rule_port_end_spin = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(0, 65535, 1));
+    gtk_spin_button_set_value(state->fw_rule_port_end_spin, 0);
+    gtk_grid_attach(GTK_GRID(rule_form), GTK_WIDGET(state->fw_rule_port_end_spin), 1, 4, 1, 1);
+    
+    gtk_box_append(GTK_BOX(fw_rules_box), rule_form);
+    
+    /* Add/Remove buttons */
+    GtkWidget *rule_buttons = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    state->fw_rule_add_btn = GTK_BUTTON(gtk_button_new_with_label("Add Rule"));
+    g_signal_connect(state->fw_rule_add_btn, "clicked",
+                     G_CALLBACK(on_add_firewall_rule), state);
+    gtk_box_append(GTK_BOX(rule_buttons), GTK_WIDGET(state->fw_rule_add_btn));
+    
+    state->fw_rule_remove_btn = GTK_BUTTON(gtk_button_new_with_label("Remove Selected"));
+    g_signal_connect(state->fw_rule_remove_btn, "clicked",
+                     G_CALLBACK(on_remove_firewall_rule), state);
+    gtk_box_append(GTK_BOX(rule_buttons), GTK_WIDGET(state->fw_rule_remove_btn));
+    
+    gtk_box_append(GTK_BOX(fw_rules_box), rule_buttons);
+    
+    gtk_expander_set_child(GTK_EXPANDER(fw_rules_expander), fw_rules_box);
+    gtk_box_append(GTK_BOX(firewall_section), GTK_WIDGET(fw_rules_expander));
     
     /* Firewall status label */
     state->firewall_status_label = GTK_LABEL(gtk_label_new("Firewall: Moderate (Block Dangerous Ports)"));
@@ -788,6 +1288,7 @@ static void setup_ui(AppState *state) {
     /* Initialize firewall policy */
     state->firewall_policy = FIREWALL_MODERATE;
     state->selected_policy_file = NULL;
+    state->firewall_config = NULL;
     
     /* Control buttons */
     button_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
@@ -868,6 +1369,11 @@ static void cleanup_state(AppState *state) {
     
     if (state->selected_policy_file) {
         g_free(state->selected_policy_file);
+    }
+    
+    if (state->firewall_config) {
+        firewall_cleanup(state->firewall_config);
+        state->firewall_config = NULL;
     }
 }
 
