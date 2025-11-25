@@ -13,6 +13,8 @@
 #include "process_control.h"
 #include "namespaces.h"
 #include "firewall.h"
+#include "cgroups.h"
+#include "monitor.h"
 
 /* Application state structure */
 typedef struct {
@@ -39,6 +41,20 @@ typedef struct {
     GtkComboBoxText *firewall_policy_combo;
     GtkButton *firewall_load_policy_btn;
     GtkLabel *firewall_status_label;
+    /* Cgroup configuration */
+    GtkCheckButton *cg_enabled_check;
+    GtkSpinButton *cg_cpu_spin;
+    GtkSpinButton *cg_memory_spin;
+    GtkSpinButton *cg_pids_spin;
+    GtkSpinButton *cg_threads_spin;
+    CgroupConfig cgroup_config;
+    /* Monitoring labels */
+    GtkLabel *mon_cpu_label;
+    GtkLabel *mon_memory_label;
+    GtkLabel *mon_threads_label;
+    GtkLabel *mon_fds_label;
+    GtkLabel *mon_status_label;
+    guint monitoring_timeout_id;
     /* Log viewer */
     GtkTextView *log_view;
     GtkTextBuffer *log_buffer;
@@ -62,6 +78,10 @@ static void on_load_firewall_policy(GtkWidget *widget, gpointer user_data);
 static void append_log(AppState *state, const char *message);
 static gboolean update_logs(gpointer user_data);
 static void on_policy_chooser_response(GtkNativeDialog *dialog, gint response_id, gpointer user_data);
+/* Monitoring functions */
+static void start_monitoring(AppState *state);
+static void stop_monitoring(AppState *state);
+static gboolean update_monitoring(gpointer user_data);
 static void setup_ui(AppState *state);
 static void cleanup_state(AppState *state);
 
@@ -162,9 +182,38 @@ static void on_run_clicked(GtkWidget *widget, gpointer user_data) {
     snprintf(log_msg, sizeof(log_msg), "Firewall Policy: %s\n", fw_policy_name[state->firewall_policy]);
     append_log(state, log_msg);
     
-    /* Create sandboxed process with namespace and firewall configuration */
+    /* Get cgroup configuration */
+    CgroupConfig cg_config = {0};
+    const CgroupConfig *cg_config_ptr = NULL;
+    if (gtk_check_button_get_active(state->cg_enabled_check)) {
+        int cpu_limit = gtk_spin_button_get_value_as_int(state->cg_cpu_spin);
+        int memory_mb = gtk_spin_button_get_value_as_int(state->cg_memory_spin);
+        int pids_limit = gtk_spin_button_get_value_as_int(state->cg_pids_spin);
+        int max_threads = gtk_spin_button_get_value_as_int(state->cg_threads_spin);
+        
+        if (init_cgroup_config(&cg_config, cpu_limit, memory_mb, pids_limit, max_threads) == 0) {
+            cg_config_ptr = &cg_config;
+            snprintf(log_msg, sizeof(log_msg), "Resource Limits: CPU=%d%%, Memory=%dMB, PIDs=%d, Threads=%d\n",
+                     cpu_limit, memory_mb, pids_limit, max_threads);
+            append_log(state, log_msg);
+        }
+    }
+    
+    /* Create sandboxed process with namespace, firewall, and cgroup configuration */
     pid_t pid = create_sandboxed_process(state->selected_file, ns_flags, uts_hostname,
-                                         state->firewall_policy, state->selected_policy_file);
+                                         state->firewall_policy, state->selected_policy_file,
+                                         cg_config_ptr);
+    
+    /* Cleanup cgroup config if process creation failed */
+    if (pid < 0 && cg_config_ptr) {
+        free_cgroup_config(&cg_config);
+    } else if (pid > 0 && cg_config_ptr) {
+        /* Deep copy cgroup_path for state */
+        if (cg_config.cgroup_path) {
+            state->cgroup_config = cg_config;
+            state->cgroup_config.cgroup_path = g_strdup(cg_config.cgroup_path);
+        }
+    }
     
     if (pid < 0) {
         gtk_label_set_text(state->status_label, "Error: Failed to create sandboxed process");
@@ -181,6 +230,9 @@ static void on_run_clicked(GtkWidget *widget, gpointer user_data) {
     snprintf(log_msg, sizeof(log_msg), "Process started with PID: %d\n", pid);
     append_log(state, log_msg);
     
+    /* Start monitoring */
+    start_monitoring(state);
+    
     /* Update UI state */
     gtk_widget_set_sensitive(GTK_WIDGET(state->select_file_btn), FALSE);
     gtk_widget_set_sensitive(GTK_WIDGET(state->run_btn), FALSE);
@@ -195,6 +247,9 @@ static void on_stop_clicked(GtkWidget *widget, gpointer user_data) {
         return;
     }
     
+    /* Stop monitoring */
+    stop_monitoring(state);
+    
     /* Terminate the sandboxed process */
     char log_msg[256];
     snprintf(log_msg, sizeof(log_msg), "Stopping process PID: %d\n", state->sandboxed_pid);
@@ -206,6 +261,19 @@ static void on_stop_clicked(GtkWidget *widget, gpointer user_data) {
         
         gtk_label_set_text(state->status_label, "Process stopped");
         append_log(state, "Process stopped successfully\n");
+        
+        /* Cleanup cgroup */
+        if (state->cgroup_config.cgroup_path) {
+            cleanup_cgroup(&state->cgroup_config);
+            free_cgroup_config(&state->cgroup_config);
+        }
+        
+        /* Clear monitoring stats */
+        gtk_label_set_text(state->mon_cpu_label, "--");
+        gtk_label_set_text(state->mon_memory_label, "--");
+        gtk_label_set_text(state->mon_threads_label, "--");
+        gtk_label_set_text(state->mon_fds_label, "--");
+        gtk_label_set_text(state->mon_status_label, "Stopped");
         
         /* Update UI state */
         gtk_widget_set_sensitive(GTK_WIDGET(state->select_file_btn), TRUE);
@@ -332,6 +400,85 @@ static gboolean update_logs(gpointer user_data) {
     fclose(log_file);
     
     return G_SOURCE_CONTINUE; /* Keep the timer running */
+}
+
+/* Start monitoring process statistics */
+static void start_monitoring(AppState *state) {
+    if (state->sandboxed_pid <= 0) {
+        return;
+    }
+    
+    /* Initialize monitoring */
+    init_monitoring(state->sandboxed_pid);
+    
+    /* Start update timer (update every 500ms) */
+    state->monitoring_timeout_id = g_timeout_add(500, update_monitoring, state);
+}
+
+/* Stop monitoring */
+static void stop_monitoring(AppState *state) {
+    if (state->monitoring_timeout_id > 0) {
+        g_source_remove(state->monitoring_timeout_id);
+        state->monitoring_timeout_id = 0;
+    }
+}
+
+/* Update monitoring display */
+static gboolean update_monitoring(gpointer user_data) {
+    AppState *state = (AppState *)user_data;
+    
+    if (!state->process_running || state->sandboxed_pid <= 0) {
+        return G_SOURCE_CONTINUE;
+    }
+    
+    ProcessStats stats;
+    if (collect_process_stats(state->sandboxed_pid, &stats) == 0) {
+        char buf[256];
+        
+        if (stats.is_running) {
+            /* Update CPU */
+            snprintf(buf, sizeof(buf), "%.2f%%", stats.cpu_percent);
+            gtk_label_set_text(state->mon_cpu_label, buf);
+            
+            /* Update Memory */
+            snprintf(buf, sizeof(buf), "%.2f MB", stats.memory_rss_kb / 1024.0);
+            gtk_label_set_text(state->mon_memory_label, buf);
+            
+            /* Update Threads */
+            snprintf(buf, sizeof(buf), "%d", stats.num_threads);
+            gtk_label_set_text(state->mon_threads_label, buf);
+            
+            /* Update File Descriptors */
+            snprintf(buf, sizeof(buf), "%d", stats.num_fds);
+            gtk_label_set_text(state->mon_fds_label, buf);
+            
+            /* Update Status */
+            gtk_label_set_text(state->mon_status_label, "Running");
+        } else {
+            /* Process stopped */
+            gtk_label_set_text(state->mon_cpu_label, "--");
+            gtk_label_set_text(state->mon_memory_label, "--");
+            gtk_label_set_text(state->mon_threads_label, "--");
+            gtk_label_set_text(state->mon_fds_label, "--");
+            
+            if (stats.signal_number > 0) {
+                snprintf(buf, sizeof(buf), "Killed by signal %d (%s)", 
+                         stats.signal_number, strsignal(stats.signal_number));
+                gtk_label_set_text(state->mon_status_label, buf);
+            } else if (stats.exit_status >= 0) {
+                snprintf(buf, sizeof(buf), "Exited with status %d", stats.exit_status);
+                gtk_label_set_text(state->mon_status_label, buf);
+            } else {
+                gtk_label_set_text(state->mon_status_label, "Stopped");
+            }
+            
+            /* Stop monitoring */
+            stop_monitoring(state);
+            state->process_running = FALSE;
+        }
+    }
+    
+    return G_SOURCE_CONTINUE;
 }
 
 /* Setup UI components */
@@ -464,7 +611,126 @@ static void setup_ui(AppState *state) {
     gtk_box_append(GTK_BOX(ns_list), GTK_WIDGET(state->ns_uts_expander));
     
     gtk_box_append(GTK_BOX(ns_section), ns_list);
-    gtk_box_append(GTK_BOX(box), ns_section);
+    
+    /* Create notebook (tabs) */
+    GtkNotebook *notebook = GTK_NOTEBOOK(gtk_notebook_new());
+    
+    /* Tab 1: Namespaces */
+    gtk_notebook_append_page(notebook, ns_section, gtk_label_new("Namespaces"));
+    
+    /* Tab 2: Resource Limits (Cgroups) */
+    GtkWidget *cg_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_widget_set_margin_top(cg_tab, 10);
+    gtk_widget_set_margin_bottom(cg_tab, 10);
+    gtk_widget_set_margin_start(cg_tab, 10);
+    gtk_widget_set_margin_end(cg_tab, 10);
+    
+    GtkWidget *cg_label = gtk_label_new("Resource Limits (Cgroups):");
+    gtk_box_append(GTK_BOX(cg_tab), cg_label);
+    
+    state->cg_enabled_check = GTK_CHECK_BUTTON(gtk_check_button_new_with_label("Enable Resource Limits"));
+    gtk_box_append(GTK_BOX(cg_tab), GTK_WIDGET(state->cg_enabled_check));
+    
+    GtkWidget *cg_grid = gtk_grid_new();
+    gtk_grid_set_column_spacing(GTK_GRID(cg_grid), 10);
+    gtk_grid_set_row_spacing(GTK_GRID(cg_grid), 10);
+    gtk_widget_set_margin_start(cg_grid, 20);
+    gtk_widget_set_margin_top(cg_grid, 10);
+    
+    /* CPU limit */
+    GtkWidget *cpu_label = gtk_label_new("CPU Limit (%):");
+    gtk_grid_attach(GTK_GRID(cg_grid), cpu_label, 0, 0, 1, 1);
+    state->cg_cpu_spin = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(0, 100, 1));
+    gtk_spin_button_set_value(state->cg_cpu_spin, 0); /* 0 = unlimited */
+    gtk_grid_attach(GTK_GRID(cg_grid), GTK_WIDGET(state->cg_cpu_spin), 1, 0, 1, 1);
+    
+    /* Memory limit */
+    GtkWidget *mem_label = gtk_label_new("Memory Limit (MB):");
+    gtk_grid_attach(GTK_GRID(cg_grid), mem_label, 0, 1, 1, 1);
+    state->cg_memory_spin = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(0, 100000, 100));
+    gtk_spin_button_set_value(state->cg_memory_spin, 0); /* 0 = unlimited */
+    gtk_grid_attach(GTK_GRID(cg_grid), GTK_WIDGET(state->cg_memory_spin), 1, 1, 1, 1);
+    
+    /* PIDs limit */
+    GtkWidget *pids_label = gtk_label_new("Max Processes:");
+    gtk_grid_attach(GTK_GRID(cg_grid), pids_label, 0, 2, 1, 1);
+    state->cg_pids_spin = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(0, 10000, 1));
+    gtk_spin_button_set_value(state->cg_pids_spin, 0); /* 0 = unlimited */
+    gtk_grid_attach(GTK_GRID(cg_grid), GTK_WIDGET(state->cg_pids_spin), 1, 2, 1, 1);
+    
+    /* Max threads/cores */
+    GtkWidget *threads_label = gtk_label_new("Max CPU Cores/Threads:");
+    gtk_grid_attach(GTK_GRID(cg_grid), threads_label, 0, 3, 1, 1);
+    state->cg_threads_spin = GTK_SPIN_BUTTON(gtk_spin_button_new_with_range(0, 64, 1));
+    gtk_spin_button_set_value(state->cg_threads_spin, 0); /* 0 = unlimited */
+    gtk_grid_attach(GTK_GRID(cg_grid), GTK_WIDGET(state->cg_threads_spin), 1, 3, 1, 1);
+    
+    gtk_box_append(GTK_BOX(cg_tab), cg_grid);
+    
+    GtkWidget *cg_info = gtk_label_new(
+        "Note: Set to 0 for unlimited.\n"
+        "• CPU Limit: Percentage of CPU time (0-100)\n"
+        "• Memory Limit: Maximum memory in MB\n"
+        "• Max Processes: Maximum number of processes\n"
+        "• Max CPU Cores: Maximum number of CPU cores/threads"
+    );
+    gtk_label_set_wrap(GTK_LABEL(cg_info), TRUE);
+    gtk_widget_set_margin_start(cg_info, 20);
+    gtk_widget_set_margin_top(cg_info, 10);
+    gtk_box_append(GTK_BOX(cg_tab), cg_info);
+    
+    gtk_notebook_append_page(notebook, cg_tab, gtk_label_new("Resource Limits"));
+    
+    /* Tab 3: Monitoring */
+    GtkWidget *mon_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_widget_set_margin_top(mon_tab, 10);
+    gtk_widget_set_margin_bottom(mon_tab, 10);
+    gtk_widget_set_margin_start(mon_tab, 10);
+    gtk_widget_set_margin_end(mon_tab, 10);
+    
+    GtkWidget *mon_label = gtk_label_new("Process Statistics:");
+    gtk_box_append(GTK_BOX(mon_tab), mon_label);
+    
+    GtkWidget *mon_grid = gtk_grid_new();
+    gtk_grid_set_column_spacing(GTK_GRID(mon_grid), 10);
+    gtk_grid_set_row_spacing(GTK_GRID(mon_grid), 10);
+    gtk_widget_set_margin_top(mon_grid, 10);
+    
+    GtkWidget *cpu_mon_label = gtk_label_new("CPU Usage:");
+    gtk_grid_attach(GTK_GRID(mon_grid), cpu_mon_label, 0, 0, 1, 1);
+    state->mon_cpu_label = GTK_LABEL(gtk_label_new("--"));
+    gtk_label_set_selectable(state->mon_cpu_label, TRUE);
+    gtk_grid_attach(GTK_GRID(mon_grid), GTK_WIDGET(state->mon_cpu_label), 1, 0, 1, 1);
+    
+    GtkWidget *mem_mon_label = gtk_label_new("Memory (RSS):");
+    gtk_grid_attach(GTK_GRID(mon_grid), mem_mon_label, 0, 1, 1, 1);
+    state->mon_memory_label = GTK_LABEL(gtk_label_new("--"));
+    gtk_label_set_selectable(state->mon_memory_label, TRUE);
+    gtk_grid_attach(GTK_GRID(mon_grid), GTK_WIDGET(state->mon_memory_label), 1, 1, 1, 1);
+    
+    GtkWidget *threads_mon_label = gtk_label_new("Threads:");
+    gtk_grid_attach(GTK_GRID(mon_grid), threads_mon_label, 0, 2, 1, 1);
+    state->mon_threads_label = GTK_LABEL(gtk_label_new("--"));
+    gtk_label_set_selectable(state->mon_threads_label, TRUE);
+    gtk_grid_attach(GTK_GRID(mon_grid), GTK_WIDGET(state->mon_threads_label), 1, 2, 1, 1);
+    
+    GtkWidget *fds_mon_label = gtk_label_new("File Descriptors:");
+    gtk_grid_attach(GTK_GRID(mon_grid), fds_mon_label, 0, 3, 1, 1);
+    state->mon_fds_label = GTK_LABEL(gtk_label_new("--"));
+    gtk_label_set_selectable(state->mon_fds_label, TRUE);
+    gtk_grid_attach(GTK_GRID(mon_grid), GTK_WIDGET(state->mon_fds_label), 1, 3, 1, 1);
+    
+    GtkWidget *status_mon_label = gtk_label_new("Status:");
+    gtk_grid_attach(GTK_GRID(mon_grid), status_mon_label, 0, 4, 1, 1);
+    state->mon_status_label = GTK_LABEL(gtk_label_new("Not running"));
+    gtk_label_set_selectable(state->mon_status_label, TRUE);
+    gtk_grid_attach(GTK_GRID(mon_grid), GTK_WIDGET(state->mon_status_label), 1, 4, 1, 1);
+    
+    gtk_box_append(GTK_BOX(mon_tab), mon_grid);
+    
+    gtk_notebook_append_page(notebook, mon_tab, gtk_label_new("Monitoring"));
+    
+    gtk_box_append(GTK_BOX(box), GTK_WIDGET(notebook));
     
     /* Firewall configuration section */
     GtkWidget *firewall_section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
@@ -583,8 +849,17 @@ static void on_activate(GtkApplication *app, gpointer user_data) {
 
 /* Cleanup application state */
 static void cleanup_state(AppState *state) {
+    /* Stop monitoring */
+    stop_monitoring(state);
+    
     if (state->process_running && state->sandboxed_pid > 0) {
         terminate_process(state->sandboxed_pid);
+    }
+    
+    /* Cleanup cgroup */
+    if (state->cgroup_config.cgroup_path) {
+        cleanup_cgroup(&state->cgroup_config);
+        free_cgroup_config(&state->cgroup_config);
     }
     
     if (state->selected_file) {
@@ -599,6 +874,9 @@ static void cleanup_state(AppState *state) {
 /* Main entry point */
 int main(int argc, char *argv[]) {
     AppState state = {0};
+    /* Initialize cgroup config */
+    memset(&state.cgroup_config, 0, sizeof(CgroupConfig));
+    state.monitoring_timeout_id = 0;
     int status;
     
     /* Initialize GTK */

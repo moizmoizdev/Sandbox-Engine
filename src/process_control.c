@@ -1,6 +1,8 @@
+#define _GNU_SOURCE
 #include "process_control.h"
 #include "namespaces.h"
 #include "firewall.h"
+#include "cgroups.h"
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -12,10 +14,11 @@
 
 /**
  * Create a sandboxed subprocess with control over it
- * Sets up namespace isolation and firewall before executing the target program
+ * Sets up namespace isolation, firewall, and cgroups before executing the target program
  */
 pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *uts_hostname,
-                                 FirewallPolicy firewall_policy, const char *policy_file) {
+                                 FirewallPolicy firewall_policy, const char *policy_file,
+                                 const CgroupConfig *cgroup_config) {
     pid_t pid;
     
     if (!file_path) {
@@ -56,6 +59,12 @@ pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *
             }
             
             /* Inner child - this is the actual sandboxed process */
+            /* This process will be PID 1 in the namespace */
+            
+            /* Setup signal handling for PID 1 */
+            /* Ignore SIGCHLD to prevent zombies (we're not the real init) */
+            signal(SIGCHLD, SIG_IGN);
+            
             /* Continue to setup remaining namespaces */
         } else if (ns_flags & NS_PID) {
             /* PID namespace was requested but failed, continue with other namespaces */
@@ -111,30 +120,74 @@ pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *
         exit(EXIT_FAILURE);
     }
     
-    /* Parent process - return child PID */
+    /* Parent process - setup cgroups if configured */
+    if (cgroup_config && (cgroup_config->cpu_limit_percent > 0 || 
+                          cgroup_config->memory_limit_mb > 0 ||
+                          cgroup_config->pids_limit > 0 ||
+                          cgroup_config->max_threads > 0)) {
+        /* Wait a moment for process to start and namespaces to be set up */
+        usleep(200000); /* 200ms - give more time for PID namespace setup */
+        
+        /* Verify process is still running before adding to cgroup */
+        if (kill(pid, 0) == 0) {
+            if (setup_cgroup(cgroup_config, pid) < 0) {
+                fprintf(stderr, "Warning: Failed to setup cgroup, continuing without resource limits\n");
+            }
+        } else {
+            fprintf(stderr, "Warning: Process exited before cgroup setup\n");
+        }
+    }
+    
     return pid;
 }
 
 /**
- * Terminate a running process
+ * Terminate a running process and its entire process tree
+ * Handles PID namespace correctly by killing all descendant processes
  */
 int terminate_process(pid_t pid) {
     if (pid <= 0) {
         return -1;
     }
     
-    /* First try SIGTERM (graceful termination) */
+    /* First, try to kill the entire process group */
+    /* Use negative PID to kill process group (if process is group leader) */
+    pid_t pgid = getpgid(pid);
+    if (pgid > 0 && pgid != getpid()) {
+        /* Kill the process group */
+        kill(-pgid, SIGTERM);
+    }
+    
+    /* Also kill the process directly */
     if (kill(pid, SIGTERM) == 0) {
         /* Wait a bit for graceful shutdown */
-        sleep(1);
+        int waited = 0;
+        for (int i = 0; i < 10; i++) { /* Wait up to 1 second */
+            usleep(100000); /* 100ms */
+            if (kill(pid, 0) != 0) {
+                if (errno == ESRCH) {
+                    /* Process is dead */
+                    return 0;
+                }
+            }
+        }
         
         /* Check if still running */
         if (kill(pid, 0) == 0) {
             /* Process still running, force kill */
-            if (kill(pid, SIGKILL) != 0) {
-                perror("kill SIGKILL");
-                return -1;
+            /* Kill process group first */
+            if (pgid > 0 && pgid != getpid()) {
+                kill(-pgid, SIGKILL);
             }
+            /* Then kill the process directly */
+            if (kill(pid, SIGKILL) != 0) {
+                if (errno != ESRCH) { /* Ignore if already dead */
+                    perror("kill SIGKILL");
+                    return -1;
+                }
+            }
+            /* Wait a moment for SIGKILL to take effect */
+            usleep(200000); /* 200ms */
         }
         return 0;
     } else {
@@ -142,8 +195,9 @@ int terminate_process(pid_t pid) {
         if (errno == ESRCH) {
             return 0; /* Process doesn't exist, consider it terminated */
         }
-        perror("kill SIGTERM");
-        return -1;
+        /* Try SIGKILL anyway */
+        kill(pid, SIGKILL);
+        return 0; /* Return success even if kill failed (process might be dead) */
     }
 }
 
