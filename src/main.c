@@ -985,15 +985,22 @@ static void setup_ui(AppState *state) {
     /* Create main window */
     state->window = GTK_WINDOW(gtk_application_window_new(state->app));
     gtk_window_set_title(state->window, "Sandboxing Engine");
-    gtk_window_set_default_size(state->window, 800, 600);
+    gtk_window_set_default_size(state->window, 1000, 700);
+    gtk_window_set_resizable(state->window, TRUE);
+    
+    /* Create scrolled window for entire content */
+    GtkWidget *main_scrolled = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(main_scrolled), 
+                                    GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_window_set_child(state->window, main_scrolled);
     
     /* Create main container */
-    box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    gtk_widget_set_margin_top(box, 10);
-    gtk_widget_set_margin_bottom(box, 10);
-    gtk_widget_set_margin_start(box, 10);
-    gtk_widget_set_margin_end(box, 10);
-    gtk_window_set_child(state->window, box);
+    box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_widget_set_margin_top(box, 5);
+    gtk_widget_set_margin_bottom(box, 5);
+    gtk_widget_set_margin_start(box, 5);
+    gtk_widget_set_margin_end(box, 5);
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(main_scrolled), box);
     
     /* Header section */
     header = gtk_label_new("Sandboxing Engine - Process Monitor");
@@ -1014,110 +1021,65 @@ static void setup_ui(AppState *state) {
     gtk_box_append(GTK_BOX(content), GTK_WIDGET(state->select_file_btn));
     
     /* Namespace configuration section */
-    GtkWidget *ns_section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    GtkWidget *ns_label = gtk_label_new("Namespace Isolation Settings:");
-    gtk_widget_set_margin_top(ns_label, 10);
+    GtkWidget *ns_section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 2);
+    gtk_widget_set_margin_top(ns_section, 2);
+    gtk_widget_set_margin_bottom(ns_section, 2);
+    gtk_widget_set_margin_start(ns_section, 2);
+    gtk_widget_set_margin_end(ns_section, 2);
+    GtkWidget *ns_label = gtk_label_new("Namespace Isolation:");
+    gtk_widget_set_margin_top(ns_label, 2);
+    gtk_widget_set_margin_bottom(ns_label, 2);
     gtk_box_append(GTK_BOX(ns_section), ns_label);
     
-    GtkWidget *ns_list = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    GtkWidget *ns_list = gtk_box_new(GTK_ORIENTATION_VERTICAL, 1);
     
-    /* PID Namespace Expander */
+    /* PID Namespace */
     state->ns_pid_check = GTK_CHECK_BUTTON(gtk_check_button_new_with_label("PID Namespace"));
     gtk_check_button_set_active(state->ns_pid_check, TRUE);
-    state->ns_pid_expander = GTK_EXPANDER(gtk_expander_new_with_mnemonic("_Details"));
-    GtkWidget *pid_details = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    GtkWidget *pid_desc = gtk_label_new("Isolates process IDs. Sandboxed process will see its own PID namespace.\n"
-                                        "• Process will think it's PID 1 (init)\n"
-                                        "• Cannot see host system processes\n"
-                                        "• Process tree is isolated\n"
-                                        "⚠ Requires root privileges or CAP_SYS_ADMIN");
-    gtk_label_set_wrap(GTK_LABEL(pid_desc), TRUE);
-    gtk_label_set_selectable(GTK_LABEL(pid_desc), TRUE);
-    gtk_widget_set_margin_start(pid_desc, 20);
-    gtk_box_append(GTK_BOX(pid_details), GTK_WIDGET(state->ns_pid_check));
-    gtk_box_append(GTK_BOX(pid_details), pid_desc);
-    gtk_expander_set_child(GTK_EXPANDER(state->ns_pid_expander), pid_details);
-    gtk_box_append(GTK_BOX(ns_list), GTK_WIDGET(state->ns_pid_expander));
+    gtk_box_append(GTK_BOX(ns_list), GTK_WIDGET(state->ns_pid_check));
     
-    /* Mount Namespace Expander */
+    /* Mount Namespace */
     state->ns_mount_check = GTK_CHECK_BUTTON(gtk_check_button_new_with_label("Mount Namespace"));
     gtk_check_button_set_active(state->ns_mount_check, TRUE);
-    state->ns_mount_expander = GTK_EXPANDER(gtk_expander_new_with_mnemonic("_Details"));
-    GtkWidget *mount_details = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    GtkWidget *mount_desc = gtk_label_new("Isolates filesystem mount points. Sandboxed process has separate filesystem view.\n"
-                                          "• Cannot see host filesystem\n"
-                                          "• Can mount its own filesystems\n"
-                                          "• File system changes are isolated\n"
-                                          "⚠ Requires root privileges or CAP_SYS_ADMIN");
-    gtk_label_set_wrap(GTK_LABEL(mount_desc), TRUE);
-    gtk_label_set_selectable(GTK_LABEL(mount_desc), TRUE);
-    gtk_widget_set_margin_start(mount_desc, 20);
-    gtk_box_append(GTK_BOX(mount_details), GTK_WIDGET(state->ns_mount_check));
-    gtk_box_append(GTK_BOX(mount_details), mount_desc);
-    gtk_expander_set_child(GTK_EXPANDER(state->ns_mount_expander), mount_details);
-    gtk_box_append(GTK_BOX(ns_list), GTK_WIDGET(state->ns_mount_expander));
+    gtk_box_append(GTK_BOX(ns_list), GTK_WIDGET(state->ns_mount_check));
     
-    /* Network Namespace Expander */
+    /* Network Namespace */
     state->ns_net_check = GTK_CHECK_BUTTON(gtk_check_button_new_with_label("Network Namespace"));
     gtk_check_button_set_active(state->ns_net_check, TRUE);
-    state->ns_net_expander = GTK_EXPANDER(gtk_expander_new_with_mnemonic("_Details"));
-    GtkWidget *net_details = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    GtkWidget *net_desc = gtk_label_new("Isolates network stack. Sandboxed process has no network access.\n"
-                                        "• No internet access\n"
-                                        "• No local network access\n"
-                                        "• Only loopback interface available\n"
-                                        "• Cannot send/receive network data\n"
-                                        "⚠ Requires root privileges or CAP_NET_ADMIN");
-    gtk_label_set_wrap(GTK_LABEL(net_desc), TRUE);
-    gtk_label_set_selectable(GTK_LABEL(net_desc), TRUE);
-    gtk_widget_set_margin_start(net_desc, 20);
-    gtk_box_append(GTK_BOX(net_details), GTK_WIDGET(state->ns_net_check));
-    gtk_box_append(GTK_BOX(net_details), net_desc);
-    gtk_expander_set_child(GTK_EXPANDER(state->ns_net_expander), net_details);
-    gtk_box_append(GTK_BOX(ns_list), GTK_WIDGET(state->ns_net_expander));
+    gtk_box_append(GTK_BOX(ns_list), GTK_WIDGET(state->ns_net_check));
     
-    /* UTS Namespace Expander */
+    /* UTS Namespace */
     state->ns_uts_check = GTK_CHECK_BUTTON(gtk_check_button_new_with_label("UTS Namespace"));
     gtk_check_button_set_active(state->ns_uts_check, TRUE);
-    state->ns_uts_expander = GTK_EXPANDER(gtk_expander_new_with_mnemonic("_Details"));
-    GtkWidget *uts_details = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    GtkWidget *uts_desc = gtk_label_new("Isolates hostname and domain name. Sandboxed process sees custom hostname.\n"
-                                        "• Process cannot identify host system\n"
-                                        "• Custom hostname can be set\n"
-                                        "• Appears as different machine");
-    gtk_label_set_wrap(GTK_LABEL(uts_desc), TRUE);
-    gtk_label_set_selectable(GTK_LABEL(uts_desc), TRUE);
-    gtk_widget_set_margin_start(uts_desc, 20);
+    gtk_box_append(GTK_BOX(ns_list), GTK_WIDGET(state->ns_uts_check));
     
+    /* UTS Hostname configuration */
     GtkWidget *uts_config = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_widget_set_margin_start(uts_config, 20);
+    gtk_widget_set_margin_top(uts_config, 2);
     GtkWidget *uts_hostname_label = gtk_label_new("Hostname:");
     state->ns_uts_hostname_entry = GTK_ENTRY(gtk_entry_new());
     gtk_entry_set_placeholder_text(state->ns_uts_hostname_entry, "sandbox (default)");
     gtk_editable_set_text(GTK_EDITABLE(state->ns_uts_hostname_entry), "sandbox");
     gtk_box_append(GTK_BOX(uts_config), uts_hostname_label);
     gtk_box_append(GTK_BOX(uts_config), GTK_WIDGET(state->ns_uts_hostname_entry));
-    gtk_widget_set_margin_start(GTK_WIDGET(uts_config), 20);
-    
-    gtk_box_append(GTK_BOX(uts_details), GTK_WIDGET(state->ns_uts_check));
-    gtk_box_append(GTK_BOX(uts_details), uts_desc);
-    gtk_box_append(GTK_BOX(uts_details), uts_config);
-    gtk_expander_set_child(GTK_EXPANDER(state->ns_uts_expander), uts_details);
-    gtk_box_append(GTK_BOX(ns_list), GTK_WIDGET(state->ns_uts_expander));
+    gtk_box_append(GTK_BOX(ns_list), uts_config);
     
     gtk_box_append(GTK_BOX(ns_section), ns_list);
     
     /* Create notebook (tabs) */
     GtkNotebook *notebook = GTK_NOTEBOOK(gtk_notebook_new());
+    gtk_widget_set_vexpand(GTK_WIDGET(notebook), FALSE);
     
     /* Tab 1: Namespaces */
     gtk_notebook_append_page(notebook, ns_section, gtk_label_new("Namespaces"));
     
     /* Tab 2: Resource Limits (Cgroups) */
-    GtkWidget *cg_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    gtk_widget_set_margin_top(cg_tab, 10);
-    gtk_widget_set_margin_bottom(cg_tab, 10);
-    gtk_widget_set_margin_start(cg_tab, 10);
-    gtk_widget_set_margin_end(cg_tab, 10);
+    GtkWidget *cg_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_widget_set_margin_top(cg_tab, 5);
+    gtk_widget_set_margin_bottom(cg_tab, 5);
+    gtk_widget_set_margin_start(cg_tab, 5);
+    gtk_widget_set_margin_end(cg_tab, 5);
     
     GtkWidget *cg_label = gtk_label_new("Resource Limits (Cgroups):");
     gtk_box_append(GTK_BOX(cg_tab), cg_label);
@@ -1127,9 +1089,9 @@ static void setup_ui(AppState *state) {
     
     GtkWidget *cg_grid = gtk_grid_new();
     gtk_grid_set_column_spacing(GTK_GRID(cg_grid), 10);
-    gtk_grid_set_row_spacing(GTK_GRID(cg_grid), 10);
-    gtk_widget_set_margin_start(cg_grid, 20);
-    gtk_widget_set_margin_top(cg_grid, 10);
+    gtk_grid_set_row_spacing(GTK_GRID(cg_grid), 5);
+    gtk_widget_set_margin_start(cg_grid, 10);
+    gtk_widget_set_margin_top(cg_grid, 5);
     
     /* CPU limit */
     GtkWidget *cpu_label = gtk_label_new("CPU Limit (%):");
@@ -1176,19 +1138,19 @@ static void setup_ui(AppState *state) {
     gtk_notebook_append_page(notebook, cg_tab, gtk_label_new("Resource Limits"));
     
     /* Tab 3: Monitoring */
-    GtkWidget *mon_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    gtk_widget_set_margin_top(mon_tab, 10);
-    gtk_widget_set_margin_bottom(mon_tab, 10);
-    gtk_widget_set_margin_start(mon_tab, 10);
-    gtk_widget_set_margin_end(mon_tab, 10);
+    GtkWidget *mon_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_widget_set_margin_top(mon_tab, 5);
+    gtk_widget_set_margin_bottom(mon_tab, 5);
+    gtk_widget_set_margin_start(mon_tab, 5);
+    gtk_widget_set_margin_end(mon_tab, 5);
     
     GtkWidget *mon_label = gtk_label_new("Process Statistics:");
     gtk_box_append(GTK_BOX(mon_tab), mon_label);
     
     GtkWidget *mon_grid = gtk_grid_new();
     gtk_grid_set_column_spacing(GTK_GRID(mon_grid), 10);
-    gtk_grid_set_row_spacing(GTK_GRID(mon_grid), 10);
-    gtk_widget_set_margin_top(mon_grid, 10);
+    gtk_grid_set_row_spacing(GTK_GRID(mon_grid), 5);
+    gtk_widget_set_margin_top(mon_grid, 5);
     
     GtkWidget *cpu_mon_label = gtk_label_new("CPU Usage:");
     gtk_grid_attach(GTK_GRID(mon_grid), cpu_mon_label, 0, 0, 1, 1);
@@ -1225,11 +1187,11 @@ static void setup_ui(AppState *state) {
     gtk_notebook_append_page(notebook, mon_tab, gtk_label_new("Monitoring"));
     
     /* Tab 4: Syscall Tracking */
-    GtkWidget *syscall_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    gtk_widget_set_margin_top(syscall_tab, 10);
-    gtk_widget_set_margin_bottom(syscall_tab, 10);
-    gtk_widget_set_margin_start(syscall_tab, 10);
-    gtk_widget_set_margin_end(syscall_tab, 10);
+    GtkWidget *syscall_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_widget_set_margin_top(syscall_tab, 5);
+    gtk_widget_set_margin_bottom(syscall_tab, 5);
+    gtk_widget_set_margin_start(syscall_tab, 5);
+    gtk_widget_set_margin_end(syscall_tab, 5);
     
     /* Enable syscall tracking checkbox */
     state->syscall_tracking_check = GTK_CHECK_BUTTON(gtk_check_button_new_with_label("Enable Syscall Tracking"));
@@ -1248,12 +1210,12 @@ static void setup_ui(AppState *state) {
     
     /* Syscall log viewer */
     GtkWidget *syscall_log_label = gtk_label_new("Syscall Log:");
-    gtk_widget_set_margin_top(syscall_log_label, 10);
+    gtk_widget_set_margin_top(syscall_log_label, 5);
     gtk_box_append(GTK_BOX(syscall_tab), syscall_log_label);
     
     GtkWidget *syscall_log_scrolled = gtk_scrolled_window_new();
-    gtk_widget_set_vexpand(syscall_log_scrolled, TRUE);
-    gtk_widget_set_size_request(syscall_log_scrolled, -1, 200);
+    gtk_widget_set_vexpand(syscall_log_scrolled, FALSE);
+    gtk_widget_set_size_request(syscall_log_scrolled, -1, 120);
     
     state->syscall_log_view = GTK_TEXT_VIEW(gtk_text_view_new());
     gtk_text_view_set_editable(state->syscall_log_view, FALSE);
@@ -1266,7 +1228,7 @@ static void setup_ui(AppState *state) {
     
     /* Syscall statistics */
     GtkWidget *syscall_stats_label = gtk_label_new("Syscall Statistics:");
-    gtk_widget_set_margin_top(syscall_stats_label, 10);
+    gtk_widget_set_margin_top(syscall_stats_label, 5);
     gtk_box_append(GTK_BOX(syscall_tab), syscall_stats_label);
     
     state->syscall_stats_store = gtk_list_store_new(4,
@@ -1301,7 +1263,8 @@ static void setup_ui(AppState *state) {
     gtk_tree_view_append_column(state->syscall_stats_tree, sc_column);
     
     GtkWidget *syscall_stats_scrolled = gtk_scrolled_window_new();
-    gtk_widget_set_size_request(syscall_stats_scrolled, -1, 150);
+    gtk_widget_set_vexpand(syscall_stats_scrolled, FALSE);
+    gtk_widget_set_size_request(syscall_stats_scrolled, -1, 100);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(syscall_stats_scrolled), GTK_WIDGET(state->syscall_stats_tree));
     gtk_box_append(GTK_BOX(syscall_tab), syscall_stats_scrolled);
     
@@ -1400,7 +1363,8 @@ static void setup_ui(AppState *state) {
     
     /* Scrolled window for rules list */
     GtkWidget *rules_scrolled = gtk_scrolled_window_new();
-    gtk_widget_set_size_request(rules_scrolled, -1, 150);
+    gtk_widget_set_vexpand(rules_scrolled, FALSE);
+    gtk_widget_set_size_request(rules_scrolled, -1, 100);
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(rules_scrolled), GTK_WIDGET(state->firewall_rules_tree));
     gtk_box_append(GTK_BOX(fw_rules_box), rules_scrolled);
     
@@ -1547,15 +1511,16 @@ static void setup_ui(AppState *state) {
     
     /* Log viewer section */
     GtkWidget *log_section = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    gtk_widget_set_margin_top(log_section, 10);
+    gtk_widget_set_margin_top(log_section, 5);
+    gtk_widget_set_vexpand(log_section, FALSE);
     GtkWidget *log_label = gtk_label_new("Firewall & Process Logs:");
     gtk_widget_set_halign(log_label, GTK_ALIGN_START);
     gtk_box_append(GTK_BOX(log_section), log_label);
     
     /* Scrolled window for log viewer */
     GtkWidget *scrolled = gtk_scrolled_window_new();
-    gtk_widget_set_vexpand(scrolled, TRUE);
-    gtk_widget_set_size_request(scrolled, -1, 200);
+    gtk_widget_set_vexpand(scrolled, FALSE);
+    gtk_widget_set_size_request(scrolled, -1, 120);
     
     /* Text view for logs */
     state->log_view = GTK_TEXT_VIEW(gtk_text_view_new());
@@ -1620,7 +1585,12 @@ int main(int argc, char *argv[]) {
     AppState state = {0};
     /* Initialize cgroup config */
     memset(&state.cgroup_config, 0, sizeof(CgroupConfig));
+    /* Initialize syscall tracker */
+    memset(&state.syscall_tracker, 0, sizeof(SyscallTracker));
     state.monitoring_timeout_id = 0;
+    state.syscall_tracking_timeout_id = 0;
+    state.process_running = FALSE;
+    state.sandboxed_pid = 0;
     int status;
     
     /* Initialize GTK */
