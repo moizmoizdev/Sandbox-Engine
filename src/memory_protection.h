@@ -53,5 +53,12 @@ int set_stack_size_limit(size_t max_stack_kb);
  */
 int disable_executable_stack(void);
 
+/**
+ * Get human-readable description of active memory protections
+ * @param config Memory protection configuration
+ * @return Static string with description (do not free)
+ */
+const char* get_memory_protection_description(const MemoryProtectionConfig *config);
+
 #endif /* MEMORY_PROTECTION_H */
 

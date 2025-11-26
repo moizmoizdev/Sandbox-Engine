@@ -3,6 +3,7 @@
 #include "namespaces.h"
 #include "firewall.h"
 #include "cgroups.h"
+#include "memory_protection.h"
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -11,14 +12,19 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <fcntl.h>
+
+/* Log file path for capturing sandboxed process output */
+#define SANDBOX_LOG_FILE "/tmp/sandbox_firewall.log"
 
 /**
  * Create a sandboxed subprocess with control over it
- * Sets up namespace isolation, firewall, and cgroups before executing the target program
+ * Sets up namespace isolation, firewall, memory protection, and cgroups before executing the target program
  */
 pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *uts_hostname,
                                  FirewallPolicy firewall_policy, const char *policy_file,
-                                 const CgroupConfig *cgroup_config) {
+                                 const CgroupConfig *cgroup_config,
+                                 const MemoryProtectionConfig *mem_prot_config) {
     pid_t pid;
     
     if (!file_path) {
@@ -93,10 +99,15 @@ pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *
             if (!fw_config) {
                 fprintf(stderr, "Warning: Failed to initialize firewall\n");
             } else {
-                /* Load custom policy file if provided */
-                if (policy_file && firewall_policy == FIREWALL_CUSTOM) {
+                /* Load policy file if provided (for STRICT, MODERATE, or CUSTOM modes) */
+                if (policy_file && (firewall_policy == FIREWALL_CUSTOM || 
+                                    firewall_policy == FIREWALL_STRICT ||
+                                    firewall_policy == FIREWALL_MODERATE)) {
                     if (firewall_load_policy(fw_config, policy_file) < 0) {
-                        fprintf(stderr, "Warning: Failed to load custom policy from %s\n", policy_file);
+                        fprintf(stderr, "Warning: Failed to load policy from %s\n", policy_file);
+                    } else {
+                        printf("Loaded %d firewall rules from %s\n", 
+                               fw_config->rule_count, policy_file);
                     }
                 }
                 
@@ -110,6 +121,30 @@ pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *
             }
         } else {
             printf("Firewall disabled - full network access granted\n");
+        }
+        
+        /* Apply memory protection if configured */
+        if (mem_prot_config && mem_prot_config->flags != 0) {
+            printf("Applying memory protection (flags=0x%x)\n", mem_prot_config->flags);
+            if (apply_memory_protection(mem_prot_config) < 0) {
+                fprintf(stderr, "Warning: Some memory protections failed to apply\n");
+                /* Continue anyway - partial protection is better than none */
+            }
+        } else {
+            printf("Memory protection disabled\n");
+        }
+        
+        /* Redirect stdout and stderr to log file so GUI can display it */
+        int log_fd = open(SANDBOX_LOG_FILE, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (log_fd >= 0) {
+            /* Write separator to log */
+            const char *sep = "\n=== Sandbox Process Output ===\n";
+            write(log_fd, sep, strlen(sep));
+            
+            /* Redirect stdout and stderr */
+            dup2(log_fd, STDOUT_FILENO);
+            dup2(log_fd, STDERR_FILENO);
+            close(log_fd);
         }
         
         /* Execute the selected file */

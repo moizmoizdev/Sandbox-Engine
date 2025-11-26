@@ -4,6 +4,7 @@
 #include <sys/types.h>
 #include "firewall.h"
 #include "cgroups.h"
+#include "memory_protection.h"
 
 /**
  * Create a sandboxed subprocess with control over it
@@ -13,11 +14,13 @@
  * @param firewall_policy Firewall policy to apply
  * @param policy_file Custom policy file path (NULL for built-in policies)
  * @param cgroup_config Cgroup configuration (NULL to skip cgroups)
+ * @param mem_prot_config Memory protection configuration (NULL to skip)
  * @return Process ID of the created subprocess, or -1 on error
  */
 pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *uts_hostname,
                                  FirewallPolicy firewall_policy, const char *policy_file,
-                                 const CgroupConfig *cgroup_config);
+                                 const CgroupConfig *cgroup_config,
+                                 const MemoryProtectionConfig *mem_prot_config);
 
 /**
  * Terminate a running process
