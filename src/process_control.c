@@ -4,6 +4,7 @@
 #include "firewall.h"
 #include "cgroups.h"
 #include "memory_protection.h"
+#include "landlock.h"
 #include <unistd.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -24,7 +25,8 @@
 pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *uts_hostname,
                                  FirewallPolicy firewall_policy, const char *policy_file,
                                  const CgroupConfig *cgroup_config,
-                                 const MemoryProtectionConfig *mem_prot_config) {
+                                 const MemoryProtectionConfig *mem_prot_config,
+                                 const LandlockConfig *landlock_config) {
     pid_t pid;
     
     if (!file_path) {
@@ -89,6 +91,40 @@ pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *
             if (setup_uts_namespace(uts_hostname ? uts_hostname : "sandbox") < 0) {
                 fprintf(stderr, "Warning: UTS namespace setup failed\n");
             }
+        }
+        
+        /* Apply Landlock file access restrictions */
+        if (landlock_config && landlock_config->enabled) {
+            printf("Applying Landlock file access restrictions (policy: %s)\n",
+                   landlock_policy_name(landlock_config->policy));
+            
+            /* Add current working directory to allow program execution */
+            char cwd[512];
+            if (getcwd(cwd, sizeof(cwd)) != NULL) {
+                /* Add the current directory with read+write+execute access */
+                landlock_add_rule((LandlockConfig*)landlock_config, cwd,
+                                 LANDLOCK_ACCESS_FS_READ | 
+                                 LANDLOCK_ACCESS_FS_WRITE_FILE |
+                                 LANDLOCK_ACCESS_FS_EXECUTE);
+                printf("Added current directory to Landlock rules: %s\n", cwd);
+            }
+            
+            /* Also add /dev for device access */
+            landlock_add_rule((LandlockConfig*)landlock_config, "/dev",
+                             LANDLOCK_ACCESS_FS_READ | LANDLOCK_ACCESS_FS_READ_DIR);
+            
+            /* Also add /proc for process info */
+            landlock_add_rule((LandlockConfig*)landlock_config, "/proc",
+                             LANDLOCK_ACCESS_FS_READ | LANDLOCK_ACCESS_FS_READ_DIR);
+            
+            if (landlock_apply(landlock_config) < 0) {
+                fprintf(stderr, "ERROR: Failed to apply Landlock ruleset - file access restrictions NOT active\n");
+                /* Continue anyway - partial sandboxing is better than none */
+            } else {
+                printf("Landlock ruleset successfully applied - file access restrictions are active\n");
+            }
+        } else {
+            printf("Landlock disabled - full file system access\n");
         }
         
         /* Setup firewall */

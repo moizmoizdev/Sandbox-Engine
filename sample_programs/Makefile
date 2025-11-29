@@ -8,7 +8,7 @@ PROGRAMS = hello cpu_intensive memory_test infinite_loop file_operations \
 
 # New security test programs
 SECURITY_PROGRAMS = stack_test mmap_exec_test mprotect_test network_connect \
-                    syscall_test print_info
+                    syscall_test print_info file_access_test
 
 ALL_PROGRAMS = $(PROGRAMS) $(SECURITY_PROGRAMS)
 

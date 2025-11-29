@@ -19,6 +19,7 @@
 #include "monitor.h"
 #include "syscall_tracker.h"
 #include "memory_protection.h"
+#include "landlock.h"
 
 /* Application state structure */
 typedef struct {
@@ -97,6 +98,11 @@ typedef struct {
     GtkSpinButton *mem_prot_stack_size_spin;
     GtkLabel *mem_prot_status_label;
     MemoryProtectionConfig memory_protection_config;
+    /* Landlock file access configuration */
+    GtkCheckButton *landlock_enabled_check;
+    GtkComboBoxText *landlock_policy_combo;
+    GtkLabel *landlock_status_label;
+    LandlockConfig *landlock_config;
     /* State variables */
     char *selected_file;
     char *selected_policy_file;
@@ -140,6 +146,9 @@ static gboolean update_syscall_tracking(gpointer user_data);
 /* Memory protection callbacks */
 static void on_memory_protection_changed(GtkWidget *widget, gpointer user_data);
 static void update_memory_protection_config(AppState *state);
+/* Landlock callbacks */
+static void on_landlock_policy_changed(GtkWidget *widget, gpointer user_data);
+static void update_landlock_config(AppState *state);
 static void refresh_syscall_logs(AppState *state);
 static void refresh_syscall_stats(AppState *state);
 static void setup_ui(AppState *state);
@@ -285,10 +294,16 @@ static void on_run_clicked(GtkWidget *widget, gpointer user_data) {
         mem_prot_ptr = &state->memory_protection_config;
     }
     
-    /* Create sandboxed process with namespace, firewall, memory protection, and cgroup configuration */
+    /* Get Landlock config pointer (NULL if disabled) */
+    const LandlockConfig *landlock_ptr = NULL;
+    if (state->landlock_config && state->landlock_config->enabled) {
+        landlock_ptr = state->landlock_config;
+    }
+    
+    /* Create sandboxed process with namespace, firewall, memory protection, cgroup, and Landlock configuration */
     pid_t pid = create_sandboxed_process(state->selected_file, ns_flags, uts_hostname,
                                          state->firewall_policy, policy_file_to_use,
-                                         cg_config_ptr, mem_prot_ptr);
+                                         cg_config_ptr, mem_prot_ptr, landlock_ptr);
     
     /* Cleanup temp file */
     if (temp_policy_file) {
@@ -865,6 +880,75 @@ static void on_memory_protection_changed(GtkWidget *widget, gpointer user_data) 
     gtk_widget_set_sensitive(GTK_WIDGET(state->mem_prot_stack_size_spin), enabled && limit_enabled);
     
     update_memory_protection_config(state);
+}
+
+/* Update Landlock configuration based on GUI state */
+static void update_landlock_config(AppState *state) {
+    if (!state) return;
+    
+    /* Cleanup existing config */
+    if (state->landlock_config) {
+        landlock_cleanup(state->landlock_config);
+        state->landlock_config = NULL;
+    }
+    
+    /* Check if Landlock is enabled */
+    if (!gtk_check_button_get_active(state->landlock_enabled_check)) {
+        if (state->landlock_status_label) {
+            gtk_label_set_text(state->landlock_status_label, "Landlock: Disabled - Full file system access");
+        }
+        return;
+    }
+    
+    /* Get policy from combo box */
+    const char *policy_text = gtk_combo_box_text_get_active_text(state->landlock_policy_combo);
+    if (!policy_text) {
+        policy_text = "Moderate";
+    }
+    
+    LandlockPolicy policy = LANDLOCK_MODERATE;
+    if (strcmp(policy_text, "Disabled") == 0) {
+        policy = LANDLOCK_DISABLED;
+    } else if (strcmp(policy_text, "Strict") == 0) {
+        policy = LANDLOCK_STRICT;
+    } else if (strcmp(policy_text, "Moderate") == 0) {
+        policy = LANDLOCK_MODERATE;
+    } else if (strcmp(policy_text, "Permissive") == 0) {
+        policy = LANDLOCK_PERMISSIVE;
+    } else if (strcmp(policy_text, "Custom") == 0) {
+        policy = LANDLOCK_CUSTOM;
+    }
+    
+    g_free((void*)policy_text);
+    
+    /* Initialize config */
+    state->landlock_config = landlock_init(policy);
+    if (state->landlock_config) {
+        state->landlock_config->enabled = 1;
+        
+        /* Update status label */
+        if (state->landlock_status_label) {
+            char status[256];
+            snprintf(status, sizeof(status), "Landlock: %s policy active", landlock_policy_name(policy));
+            gtk_label_set_text(state->landlock_status_label, status);
+        }
+    } else {
+        if (state->landlock_status_label) {
+            gtk_label_set_text(state->landlock_status_label, "Landlock: Error initializing");
+        }
+    }
+}
+
+/* Landlock policy changed callback */
+static void on_landlock_policy_changed(GtkWidget *widget, gpointer user_data) {
+    AppState *state = (AppState *)user_data;
+    (void)widget;
+    
+    /* Enable/disable policy combo based on master enable checkbox */
+    gboolean enabled = gtk_check_button_get_active(state->landlock_enabled_check);
+    gtk_widget_set_sensitive(GTK_WIDGET(state->landlock_policy_combo), enabled);
+    
+    update_landlock_config(state);
 }
 
 /* Append log message to the log viewer */
@@ -1846,7 +1930,87 @@ static void setup_ui(AppState *state) {
     gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(memprot_scrolled), memprot_tab);
     gtk_notebook_append_page(notebook, memprot_scrolled, gtk_label_new("Memory Protection"));
     
-    /* Tab 7: Application Logs */
+    /* Tab 7: Landlock File Access Control (scrollable) */
+    GtkWidget *landlock_scrolled = gtk_scrolled_window_new();
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(landlock_scrolled), 
+                                    GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    
+    GtkWidget *landlock_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    gtk_widget_set_margin_top(landlock_tab, 10);
+    gtk_widget_set_margin_bottom(landlock_tab, 10);
+    gtk_widget_set_margin_start(landlock_tab, 10);
+    gtk_widget_set_margin_end(landlock_tab, 10);
+    
+    /* Header */
+    GtkWidget *landlock_header = gtk_label_new(NULL);
+    gtk_label_set_markup(GTK_LABEL(landlock_header), "<b>Landlock File Access Control</b>");
+    gtk_widget_set_halign(landlock_header, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(landlock_tab), landlock_header);
+    
+    /* Enable Landlock checkbox */
+    state->landlock_enabled_check = GTK_CHECK_BUTTON(
+        gtk_check_button_new_with_label("Enable Landlock File Access Restrictions"));
+    gtk_check_button_set_active(state->landlock_enabled_check, FALSE);
+    g_signal_connect(state->landlock_enabled_check, "toggled",
+                     G_CALLBACK(on_landlock_policy_changed), state);
+    gtk_box_append(GTK_BOX(landlock_tab), GTK_WIDGET(state->landlock_enabled_check));
+    
+    /* Policy selection frame */
+    GtkWidget *landlock_policy_frame = gtk_frame_new("File Access Policy");
+    GtkWidget *landlock_policy_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 8);
+    gtk_widget_set_margin_top(landlock_policy_box, 10);
+    gtk_widget_set_margin_bottom(landlock_policy_box, 10);
+    gtk_widget_set_margin_start(landlock_policy_box, 10);
+    gtk_widget_set_margin_end(landlock_policy_box, 10);
+    
+    GtkWidget *landlock_policy_label = gtk_label_new("Policy:");
+    gtk_widget_set_halign(landlock_policy_label, GTK_ALIGN_START);
+    gtk_box_append(GTK_BOX(landlock_policy_box), landlock_policy_label);
+    
+    state->landlock_policy_combo = GTK_COMBO_BOX_TEXT(gtk_combo_box_text_new());
+    gtk_combo_box_text_append_text(state->landlock_policy_combo, "Disabled");
+    gtk_combo_box_text_append_text(state->landlock_policy_combo, "Strict");
+    gtk_combo_box_text_append_text(state->landlock_policy_combo, "Moderate");
+    gtk_combo_box_text_append_text(state->landlock_policy_combo, "Permissive");
+    gtk_combo_box_text_append_text(state->landlock_policy_combo, "Custom");
+    gtk_combo_box_set_active(GTK_COMBO_BOX(state->landlock_policy_combo), 2); /* Default to Moderate */
+    g_signal_connect(state->landlock_policy_combo, "changed",
+                     G_CALLBACK(on_landlock_policy_changed), state);
+    gtk_widget_set_sensitive(GTK_WIDGET(state->landlock_policy_combo), FALSE);
+    gtk_box_append(GTK_BOX(landlock_policy_box), GTK_WIDGET(state->landlock_policy_combo));
+    
+    gtk_frame_set_child(GTK_FRAME(landlock_policy_frame), landlock_policy_box);
+    gtk_box_append(GTK_BOX(landlock_tab), landlock_policy_frame);
+    
+    /* Status label */
+    state->landlock_status_label = GTK_LABEL(gtk_label_new("Landlock: Disabled - Full file system access"));
+    gtk_widget_set_halign(GTK_WIDGET(state->landlock_status_label), GTK_ALIGN_START);
+    gtk_widget_set_margin_top(GTK_WIDGET(state->landlock_status_label), 10);
+    gtk_box_append(GTK_BOX(landlock_tab), GTK_WIDGET(state->landlock_status_label));
+    
+    /* Info label */
+    GtkWidget *landlock_info = gtk_label_new(
+        "Landlock File Access Control:\n"
+        "• Strict: Minimal access - only execution of program and system libraries\n"
+        "• Moderate: Allow read access to system directories, block writes to /tmp\n"
+        "• Permissive: Allow reads from most system paths, restrict writes\n"
+        "• Custom: User-defined file access rules\n\n"
+        "Note: Landlock requires Linux kernel 5.13+. If unavailable, restrictions will be disabled.\n"
+        "Landlock prevents sandboxed processes from accessing files outside allowed paths."
+    );
+    gtk_label_set_wrap(GTK_LABEL(landlock_info), TRUE);
+    gtk_widget_set_halign(landlock_info, GTK_ALIGN_START);
+    gtk_widget_set_margin_top(landlock_info, 10);
+    gtk_box_append(GTK_BOX(landlock_tab), landlock_info);
+    
+    gtk_scrolled_window_set_child(GTK_SCROLLED_WINDOW(landlock_scrolled), landlock_tab);
+    gtk_notebook_append_page(notebook, landlock_scrolled, gtk_label_new("File Access"));
+    
+    /* Initialize Landlock config */
+    state->landlock_config = NULL;
+    update_landlock_config(state);
+    
+    /* Tab 8: Application Logs */
     GtkWidget *logs_tab = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     gtk_widget_set_margin_top(logs_tab, 5);
     gtk_widget_set_margin_bottom(logs_tab, 5);
@@ -1971,6 +2135,11 @@ static void cleanup_state(AppState *state) {
     if (state->firewall_config) {
         firewall_cleanup(state->firewall_config);
         state->firewall_config = NULL;
+    }
+    
+    if (state->landlock_config) {
+        landlock_cleanup(state->landlock_config);
+        state->landlock_config = NULL;
     }
     
     /* Cleanup syscall tracker */
