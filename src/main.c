@@ -103,6 +103,10 @@ typedef struct {
     GtkComboBoxText *landlock_policy_combo;
     GtkLabel *landlock_status_label;
     LandlockConfig *landlock_config;
+    /* Process termination options */
+    GtkCheckButton *kill_soft_check;
+    GtkCheckButton *kill_hard_check;
+    GtkCheckButton *kill_cgroup_check;
     /* State variables */
     char *selected_file;
     char *selected_policy_file;
@@ -355,7 +359,22 @@ static void on_stop_clicked(GtkWidget *widget, gpointer user_data) {
     AppState *state = (AppState *)user_data;
     
     if (!state->process_running || state->sandboxed_pid <= 0) {
+        append_log(state, "⚠️  No process running\n");
         return;
+    }
+    
+    /* Check if process is actually still alive */
+    if (kill(state->sandboxed_pid, 0) != 0) {
+        if (errno == ESRCH) {
+            append_log(state, "⚠️  Process already dead (cleaning up)\n");
+            state->process_running = FALSE;
+            state->sandboxed_pid = 0;
+            gtk_label_set_text(state->status_label, "Process not running");
+            gtk_widget_set_sensitive(GTK_WIDGET(state->select_file_btn), TRUE);
+            gtk_widget_set_sensitive(GTK_WIDGET(state->run_btn), TRUE);
+            gtk_widget_set_sensitive(GTK_WIDGET(state->stop_btn), FALSE);
+            return;
+        }
     }
     
     /* Stop monitoring */
@@ -364,17 +383,42 @@ static void on_stop_clicked(GtkWidget *widget, gpointer user_data) {
     /* Stop syscall tracking */
     stop_syscall_tracking(state);
     
+    /* Build termination methods from checkboxes */
+    int kill_methods = 0;
+    
+    if (gtk_check_button_get_active(state->kill_soft_check)) {
+        kill_methods |= TERM_SOFT_KILL;
+    }
+    
+    if (gtk_check_button_get_active(state->kill_hard_check)) {
+        kill_methods |= TERM_HARD_KILL;
+    }
+    
+    if (gtk_check_button_get_active(state->kill_cgroup_check)) {
+        kill_methods |= TERM_CGROUP_KILL;
+    }
+    
+    /* If no methods selected, use all methods as fallback */
+    if (kill_methods == 0) {
+        kill_methods = TERM_SOFT_KILL | TERM_HARD_KILL | TERM_CGROUP_KILL;
+        append_log(state, "⚠️  Warning: No kill methods selected, using all methods\n");
+    }
+    
     /* Terminate the sandboxed process */
     char log_msg[256];
-    snprintf(log_msg, sizeof(log_msg), "Stopping process PID: %d\n", state->sandboxed_pid);
+    snprintf(log_msg, sizeof(log_msg), "Stopping process PID: %d with methods: %s%s%s\n", 
+             state->sandboxed_pid,
+             (kill_methods & TERM_SOFT_KILL) ? "SIGTERM " : "",
+             (kill_methods & TERM_HARD_KILL) ? "SIGKILL " : "",
+             (kill_methods & TERM_CGROUP_KILL) ? "CGROUP" : "");
     append_log(state, log_msg);
     
-    if (terminate_process(state->sandboxed_pid) == 0) {
+    if (terminate_process(state->sandboxed_pid, kill_methods) == 0) {
         state->process_running = FALSE;
         state->sandboxed_pid = 0;
         
         gtk_label_set_text(state->status_label, "Process stopped");
-        append_log(state, "Process stopped successfully\n");
+        append_log(state, "✅ Process stopped successfully\n");
         
         /* Cleanup cgroup */
         if (state->cgroup_config.cgroup_path) {
@@ -395,7 +439,7 @@ static void on_stop_clicked(GtkWidget *widget, gpointer user_data) {
         gtk_widget_set_sensitive(GTK_WIDGET(state->stop_btn), FALSE);
     } else {
         gtk_label_set_text(state->status_label, "Error: Failed to stop process");
-        append_log(state, "ERROR: Failed to stop process\n");
+        append_log(state, "❌ ERROR: Failed to stop process\n");
     }
 }
 
@@ -1058,26 +1102,56 @@ static gboolean update_monitoring(gpointer user_data) {
             /* Update Status */
             gtk_label_set_text(state->mon_status_label, "Running");
         } else {
-            /* Process stopped */
+            /* Process stopped - detected by monitoring */
             gtk_label_set_text(state->mon_cpu_label, "--");
             gtk_label_set_text(state->mon_memory_label, "--");
             gtk_label_set_text(state->mon_threads_label, "--");
             gtk_label_set_text(state->mon_fds_label, "--");
             
+            /* Determine why it stopped and update status */
+            char status_msg[256];
+            char log_msg[512];
+            
             if (stats.signal_number > 0) {
-                snprintf(buf, sizeof(buf), "Killed by signal %d (%s)", 
+                snprintf(status_msg, sizeof(status_msg), "Killed by signal %d (%s)", 
                          stats.signal_number, g_strsignal(stats.signal_number));
-                gtk_label_set_text(state->mon_status_label, buf);
+                snprintf(log_msg, sizeof(log_msg), "⚠️  Process killed by signal %d (%s)\n", 
+                         stats.signal_number, g_strsignal(stats.signal_number));
+                gtk_label_set_text(state->mon_status_label, status_msg);
             } else if (stats.exit_status >= 0) {
-                snprintf(buf, sizeof(buf), "Exited with status %d", stats.exit_status);
-                gtk_label_set_text(state->mon_status_label, buf);
+                snprintf(status_msg, sizeof(status_msg), "Exited with status %d", stats.exit_status);
+                snprintf(log_msg, sizeof(log_msg), "✅ Process exited with status %d\n", stats.exit_status);
+                gtk_label_set_text(state->mon_status_label, status_msg);
             } else {
+                snprintf(status_msg, sizeof(status_msg), "Stopped (unknown reason)");
+                snprintf(log_msg, sizeof(log_msg), "⚠️  Process stopped (unknown reason)\n");
                 gtk_label_set_text(state->mon_status_label, "Stopped");
             }
             
-            /* Stop monitoring */
+            /* Update main status label */
+            gtk_label_set_text(state->status_label, status_msg);
+            
+            /* Log the event */
+            append_log(state, log_msg);
+            
+            /* Stop monitoring and syscall tracking */
             stop_monitoring(state);
+            stop_syscall_tracking(state);
+            
+            /* Update UI state */
             state->process_running = FALSE;
+            state->sandboxed_pid = 0;
+            
+            /* Update buttons - enable run, disable stop */
+            gtk_widget_set_sensitive(GTK_WIDGET(state->select_file_btn), TRUE);
+            gtk_widget_set_sensitive(GTK_WIDGET(state->run_btn), TRUE);
+            gtk_widget_set_sensitive(GTK_WIDGET(state->stop_btn), FALSE);
+            
+            /* Cleanup cgroup if it exists */
+            if (state->cgroup_config.cgroup_path) {
+                cleanup_cgroup(&state->cgroup_config);
+                free_cgroup_config(&state->cgroup_config);
+            }
         }
     }
     
@@ -1949,11 +2023,18 @@ static void setup_ui(AppState *state) {
     
     /* Enable Landlock checkbox */
     state->landlock_enabled_check = GTK_CHECK_BUTTON(
-        gtk_check_button_new_with_label("Enable Landlock File Access Restrictions"));
+        gtk_check_button_new_with_label("Enable Landlock File Access Restrictions (Experimental - May Block Execution)"));
     gtk_check_button_set_active(state->landlock_enabled_check, FALSE);
     g_signal_connect(state->landlock_enabled_check, "toggled",
                      G_CALLBACK(on_landlock_policy_changed), state);
     gtk_box_append(GTK_BOX(landlock_tab), GTK_WIDGET(state->landlock_enabled_check));
+    
+    /* Add warning label */
+    GtkWidget *landlock_warning = gtk_label_new("⚠️  Note: Keep Landlock DISABLED unless testing file access restrictions.\nStrict policies may prevent program execution.");
+    gtk_label_set_wrap(GTK_LABEL(landlock_warning), TRUE);
+    gtk_widget_set_margin_top(landlock_warning, 5);
+    gtk_widget_set_margin_start(landlock_warning, 10);
+    gtk_box_append(GTK_BOX(landlock_tab), landlock_warning);
     
     /* Policy selection frame */
     GtkWidget *landlock_policy_frame = gtk_frame_new("File Access Policy");
@@ -2090,6 +2171,34 @@ static void setup_ui(AppState *state) {
     gtk_widget_set_sensitive(GTK_WIDGET(state->stop_btn), FALSE);
     gtk_box_append(GTK_BOX(button_box), GTK_WIDGET(state->stop_btn));
     
+    /* Termination method options */
+    GtkWidget *kill_options_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
+    gtk_widget_set_margin_start(kill_options_box, 10);
+    gtk_widget_set_margin_top(kill_options_box, 5);
+    
+    GtkWidget *kill_label = gtk_label_new("Termination Methods:");
+    gtk_box_append(GTK_BOX(kill_options_box), kill_label);
+    
+    state->kill_soft_check = GTK_CHECK_BUTTON(gtk_check_button_new_with_label("Soft Kill (SIGTERM)"));
+    gtk_check_button_set_active(state->kill_soft_check, TRUE);
+    gtk_widget_set_tooltip_text(GTK_WIDGET(state->kill_soft_check), 
+                                "Graceful termination with SIGTERM - allows cleanup");
+    gtk_box_append(GTK_BOX(kill_options_box), GTK_WIDGET(state->kill_soft_check));
+    
+    state->kill_hard_check = GTK_CHECK_BUTTON(gtk_check_button_new_with_label("Hard Kill (SIGKILL)"));
+    gtk_check_button_set_active(state->kill_hard_check, TRUE);
+    gtk_widget_set_tooltip_text(GTK_WIDGET(state->kill_hard_check), 
+                                "Force kill with SIGKILL - cannot be ignored");
+    gtk_box_append(GTK_BOX(kill_options_box), GTK_WIDGET(state->kill_hard_check));
+    
+    state->kill_cgroup_check = GTK_CHECK_BUTTON(gtk_check_button_new_with_label("Cgroup Kill"));
+    gtk_check_button_set_active(state->kill_cgroup_check, TRUE);
+    gtk_widget_set_tooltip_text(GTK_WIDGET(state->kill_cgroup_check), 
+                                "Kill all processes in cgroup - finds ALL descendants");
+    gtk_box_append(GTK_BOX(kill_options_box), GTK_WIDGET(state->kill_cgroup_check));
+    
+    gtk_box_append(GTK_BOX(box), kill_options_box);
+    
     /* Status label */
     state->status_label = GTK_LABEL(gtk_label_new("Ready"));
     gtk_box_append(GTK_BOX(box), GTK_WIDGET(state->status_label));
@@ -2115,7 +2224,8 @@ static void cleanup_state(AppState *state) {
     stop_monitoring(state);
     
     if (state->process_running && state->sandboxed_pid > 0) {
-        terminate_process(state->sandboxed_pid);
+        /* Use all termination methods on cleanup */
+        terminate_process(state->sandboxed_pid, 0);
     }
     
     /* Cleanup cgroup */

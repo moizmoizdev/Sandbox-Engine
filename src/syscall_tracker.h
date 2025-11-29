@@ -49,6 +49,9 @@ typedef struct {
     int filter_enabled;
     unsigned long *filtered_syscalls;  /* Array of syscall numbers to filter */
     int filter_count;
+    
+    /* Entry/Exit tracking */
+    int in_syscall;  /* Toggle: 0=entry, 1=exit */
 } SyscallTracker;
 
 /**

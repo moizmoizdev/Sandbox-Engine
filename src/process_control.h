@@ -25,12 +25,18 @@ pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *
                                  const MemoryProtectionConfig *mem_prot_config,
                                  const LandlockConfig *landlock_config);
 
+/* Termination method flags */
+#define TERM_SOFT_KILL     (1 << 0)  /* Use SIGTERM (graceful, recursive) */
+#define TERM_HARD_KILL     (1 << 1)  /* Use SIGKILL (force, recursive) */
+#define TERM_CGROUP_KILL   (1 << 2)  /* Kill via cgroup (all processes) */
+
 /**
- * Terminate a running process
+ * Terminate a running process with specified methods
  * @param pid Process ID to terminate
+ * @param methods Bitmask of termination methods (TERM_SOFT_KILL | TERM_HARD_KILL | TERM_CGROUP_KILL)
  * @return 0 on success, -1 on error
  */
-int terminate_process(pid_t pid);
+int terminate_process(pid_t pid, int methods);
 
 /**
  * Check if a process is still running

@@ -1573,15 +1573,25 @@ int syscall_tracker_process_event(SyscallTracker *tracker) {
         return 0;
     }
     
-    /* Check if this is syscall entry or exit */
-    if (WSTOPSIG(status) == (SIGTRAP | 0x80)) {
-        /* Syscall exit */
+    /* Toggle between syscall entry and exit */
+    tracker->in_syscall = !tracker->in_syscall;
+    
+    /* Only log and count on syscall EXIT (when we have return value) */
+    if (!tracker->in_syscall) {
+        /* This is syscall exit - we have the return value now */
         SyscallLogEntry *entry = &tracker->log_entries[tracker->log_index];
         
         entry->syscall_number = syscall_number;
         syscall_number_to_name(syscall_number, entry->syscall_name, MAX_SYSCALL_NAME);
-        entry->return_value = regs.rax;
-        entry->error_code = (entry->return_value < 0) ? -entry->return_value : 0;
+        entry->return_value = (long)regs.rax;
+        
+        /* Check if this is an error (Linux syscalls return -errno in range [-4095, -1]) */
+        if (entry->return_value < 0 && entry->return_value >= -4095) {
+            entry->error_code = -(int)entry->return_value;  /* Convert to positive errno */
+        } else {
+            entry->error_code = 0;  /* Success */
+        }
+        
         entry->timestamp = time(NULL);
         entry->pid = tracker->target_pid;
         entry->tid = syscall(__NR_gettid);
@@ -1726,7 +1736,7 @@ void syscall_tracker_cleanup(SyscallTracker *tracker) {
     memset(tracker, 0, sizeof(SyscallTracker));
 }
 
-/* Format entry */
+                                                                                                                                                                                                                                                                                                                    /* Format entry */
 int syscall_format_entry(const SyscallLogEntry *entry, char *buffer, size_t buffer_size) {
     if (!entry || !buffer) {
         return 0;

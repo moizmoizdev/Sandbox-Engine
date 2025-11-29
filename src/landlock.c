@@ -152,13 +152,21 @@ int landlock_add_rule(LandlockConfig *config, const char *path, uint64_t access)
  * Initialize preset rules for STRICT policy
  */
 static int init_strict_rules(LandlockConfig *config) {
-    /* STRICT: Only allow execution of the program itself */
-    /* Note: The program path will be added by the caller if needed */
-    /* For now, allow minimal system access for libraries */
-    if (landlock_add_rule(config, "/usr/lib", LANDLOCK_ACCESS_FS_READ) < 0) return -1;
-    if (landlock_add_rule(config, "/lib", LANDLOCK_ACCESS_FS_READ) < 0) return -1;
-    if (landlock_add_rule(config, "/lib64", LANDLOCK_ACCESS_FS_READ) < 0) return -1;
-    if (landlock_add_rule(config, "/usr/lib64", LANDLOCK_ACCESS_FS_READ) < 0) return -1;
+    /* STRICT: Only allow execution of the program itself and reading libraries */
+    /* Allow reading and executing from library directories (needed for dynamic linker) */
+    if (landlock_add_rule(config, "/usr/lib", LANDLOCK_ACCESS_FS_READ | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_EXECUTE) < 0) return -1;
+    if (landlock_add_rule(config, "/lib", LANDLOCK_ACCESS_FS_READ | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_EXECUTE) < 0) return -1;
+    if (landlock_add_rule(config, "/lib64", LANDLOCK_ACCESS_FS_READ | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_EXECUTE) < 0) return -1;
+    if (landlock_add_rule(config, "/usr/lib64", LANDLOCK_ACCESS_FS_READ | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_EXECUTE) < 0) return -1;
+    
+    /* Allow execution from system library directories (includes dynamic linker) */
+    /* Note: The above /lib64 rule already covers ld-linux-x86-64.so.2 */
+    if (landlock_add_rule(config, "/lib/x86_64-linux-gnu", 
+                         LANDLOCK_ACCESS_FS_READ | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_EXECUTE) < 0) {
+        /* Might not exist on all systems, that's OK */
+    }
+    
+    /* Note: The actual program directory is added by caller with EXECUTE permission */
     return 0;
 }
 

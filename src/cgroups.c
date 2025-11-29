@@ -120,9 +120,13 @@ static int set_cpu_limit(const char *cgroup_path, int cpu_percent) {
     
     if (cgroup_version == 2) {
         snprintf(cpu_path, sizeof(cpu_path), "%s/cpu.max", cgroup_path);
-        /* Format: "50000 100000" means 50% (quota/period) */
+        /* Format: "quota period" in microseconds
+         * Period is standard 100000us (100ms)
+         * Quota = (percent * 100000) / 100
+         * Example: 5% = 5000us out of 100000us */
         char cpu_value[64];
-        snprintf(cpu_value, sizeof(cpu_value), "%d 100", cpu_percent);
+        int quota = (cpu_percent * 100000) / 100;
+        snprintf(cpu_value, sizeof(cpu_value), "%d 100000", quota);
         return write_to_file(cpu_path, cpu_value);
     } else {
         /* Cgroup v1 */
@@ -252,6 +256,12 @@ int setup_cgroup(const CgroupConfig *config, pid_t pid) {
             fprintf(stderr, "Error: Cannot detect cgroup version\n");
             return -1;
         }
+    }
+    
+    /* For cgroup v2, enable CPU and memory controllers in parent cgroup */
+    if (cgroup_version == 2) {
+        /* Try to enable controllers - may fail without root, that's OK */
+        write_to_file("/sys/fs/cgroup/cgroup.subtree_control", "+cpu +memory +pids");
     }
     
     /* Create cgroup */
