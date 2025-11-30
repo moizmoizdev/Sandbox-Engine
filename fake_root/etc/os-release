@@ -1,0 +1,11 @@
+NAME="Ubuntu"
+VERSION="20.04 LTS (Faked by Sandbox)"
+ID=ubuntu
+ID_LIKE=debian
+PRETTY_NAME="Ubuntu 20.04 LTS (Sandbox Spoofed)"
+VERSION_ID="20.04"
+HOME_URL="https://example.com/sandbox"
+SUPPORT_URL="https://example.com/sandbox/support"
+BUG_REPORT_URL="https://example.com/sandbox/bugs"
+
+

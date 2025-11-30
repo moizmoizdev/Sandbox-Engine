@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <limits.h>
 
 /* Linux-specific namespace constants */
 #ifndef CLONE_NEWNS
@@ -74,7 +75,32 @@ int setup_mount_namespace(void) {
         perror("mount MS_PRIVATE");
         /* Not critical, continue */
     }
-    
+
+    /* Optional OS info spoofing: bind-mount a fake /etc/os-release if present.
+     * This is purely inside the mount namespace and does NOT affect the host.
+     *
+     * Layout expected (relative to the directory where ./main is started):
+     *   fake_root/etc/os-release
+     */
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof(cwd)) != NULL) {
+        char fake_os_release[PATH_MAX];
+        snprintf(fake_os_release, sizeof(fake_os_release),
+                 "%s/fake_root/etc/os-release", cwd);
+
+        struct stat st;
+        if (stat(fake_os_release, &st) == 0 && S_ISREG(st.st_mode)) {
+            if (mount(fake_os_release, "/etc/os-release", NULL, MS_BIND, NULL) == 0) {
+                printf("Bound fake /etc/os-release from %s\n", fake_os_release);
+            } else {
+                perror("mount fake /etc/os-release");
+            }
+        } else {
+            /* If fake file is missing, just skip spoofing */
+            /* fprintf(stderr, "Note: fake_root/etc/os-release not found, skipping OS spoofing\n"); */
+        }
+    }
+
     printf("Mount namespace created successfully\n");
     return 0;
 }
