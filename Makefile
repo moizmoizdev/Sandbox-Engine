@@ -7,13 +7,18 @@ SRCDIR = src
 OBJDIR = obj
 SAMPLEDIR = sample_programs
 
-SOURCES = $(filter-out $(SRCDIR)/%_test.c, $(wildcard $(SRCDIR)/*.c))
+SOURCES = $(filter-out $(SRCDIR)/%_test.c $(SRCDIR)/test_runner.c, $(wildcard $(SRCDIR)/*.c))
 OBJECTS = $(SOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
 TARGET = main
 
-.PHONY: all clean directories samples
+# Test runner sources (exclude main.c which has GTK GUI, include test_runner.c)
+TEST_RUNNER_SOURCES = $(filter-out $(SRCDIR)/main.c $(SRCDIR)/%_test.c, $(wildcard $(SRCDIR)/*.c))
+TEST_RUNNER_OBJECTS = $(TEST_RUNNER_SOURCES:$(SRCDIR)/%.c=$(OBJDIR)/%.o)
+TEST_RUNNER_TARGET = test_runner
 
-all: directories $(TARGET) samples
+.PHONY: all clean directories samples test
+
+all: directories $(TARGET) $(TEST_RUNNER_TARGET) samples
 
 samples:
 	@if [ -d "$(SAMPLEDIR)" ]; then \
@@ -27,11 +32,18 @@ directories:
 $(TARGET): $(OBJECTS)
 	$(CC) $(OBJECTS) -o $@ $(GTK_LIBS)
 
+$(TEST_RUNNER_TARGET): $(TEST_RUNNER_OBJECTS)
+	$(CC) $(TEST_RUNNER_OBJECTS) -o $@
+
 $(OBJDIR)/%.o: $(SRCDIR)/%.c
 	$(CC) $(CFLAGS) $(GTK_CFLAGS) -c $< -o $@
 
+test: $(TEST_RUNNER_TARGET) samples
+	@echo "Running automated firewall tests..."
+	@./$(TEST_RUNNER_TARGET)
+
 clean:
-	rm -rf $(OBJDIR) $(TARGET)
+	rm -rf $(OBJDIR) $(TARGET) $(TEST_RUNNER_TARGET)
 	@if [ -d "$(SAMPLEDIR)" ]; then \
 		$(MAKE) -C $(SAMPLEDIR) clean; \
 	fi

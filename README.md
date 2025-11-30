@@ -74,24 +74,43 @@ make clean
 
 ## Usage
 
-```bash
-./main
-```
+### Quick Start
 
-**Note:** Namespace isolation features (PID, mount, network, UTS) require root privileges or appropriate Linux capabilities. If you see "Operation not permitted" errors, you can either:
-
-1. **Run with sudo** (for testing):
+1. **Build the project:**
    ```bash
-   sudo ./main
+   make
    ```
 
-2. **Set capabilities** (for production):
+2. **Set Linux capabilities** (allows namespace operations without root):
    ```bash
-   sudo setcap cap_sys_admin,cap_net_admin+ep ./main
+   bash setup_capabilities.sh
+   ```
+
+3. **Run the application:**
+   ```bash
    ./main
    ```
 
-3. **Continue without namespaces**: The sandbox will still work with other isolation features (firewall, seccomp) that don't require root.
+### Automated Testing
+
+**Run comprehensive firewall tests** (fully automated, no manual testing required):
+
+```bash
+# Make script executable (first time only)
+chmod +x run_firewall_tests.sh
+
+# Run all tests automatically
+./run_firewall_tests.sh
+```
+
+This will:
+- Clean and rebuild the project
+- Set up Linux capabilities
+- Test all firewall enforcement modes
+- Verify seccomp-BPF and namespace isolation
+- Generate comprehensive test report
+
+**See [AUTOMATED_TESTING_GUIDE.md](AUTOMATED_TESTING_GUIDE.md) for detailed testing documentation.**
 
 ## Firewall System
 
@@ -232,31 +251,6 @@ The firewall tab has been completely redesigned with modern UI principles:
 - **Load/Save:** Easy policy file management with file choosers
 
 ## Testing
-
-### Automated Firewall Testing
-
-A comprehensive firewall test suite is provided to validate all security features:
-
-```bash
-# Make script executable
-chmod +x test_firewall.sh
-
-# Run comprehensive tests
-./test_firewall.sh
-```
-
-The test script will:
-1. Build the sandbox engine
-2. Set up Linux capabilities
-3. Build all test programs
-4. Validate firewall enforcement for all modes (NO_NETWORK, STRICT, MODERATE, CUSTOM)
-5. Verify seccomp-BPF implementation
-6. Check kernel compatibility
-7. Test documentation accuracy
-
-**See [FIREWALL_TESTING_GUIDE.md](FIREWALL_TESTING_GUIDE.md) for detailed testing instructions.**
-
-### Manual Testing
 
 Sample test programs are provided in the `sample_programs/` directory. To build them:
 
