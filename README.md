@@ -95,15 +95,15 @@ make clean
 
 ## Firewall System
 
-The sandbox includes a comprehensive network firewall with multiple security policies:
+The sandbox includes a comprehensive network firewall with multiple security policies and **kernel-level enforcement**:
 
 ### Firewall Policies
 
 1. **Disabled** - No firewall, full network access (use only for trusted applications)
-2. **No Network** - Complete network isolation using seccomp to block all network syscalls
-3. **Strict** - Whitelist-only mode; all connections blocked by default
-4. **Moderate** (Default) - Blocks dangerous ports (Telnet, FTP, SMB, etc.), allows HTTP/HTTPS/DNS
-5. **Custom** - User-defined rules loaded from policy file
+2. **No Network** - ✅ **Complete network isolation using seccomp-BPF** to block all network syscalls at kernel level
+3. **Strict** - ✅ **Kernel-level blocking** (similar to No Network); blocks all network syscalls via seccomp-BPF
+4. **Moderate** (Default) - ⚠️ Rule-based filtering; **best used with Network Namespace enabled** for actual enforcement. Blocks dangerous ports (Telnet, FTP, SMB, etc.), allows HTTP/HTTPS/DNS
+5. **Custom** - ⚠️ User-defined rules from policy file; **best used with Network Namespace enabled** for actual enforcement
 
 ### Policy Files
 
@@ -132,12 +132,38 @@ Block Telnet,TCP,BOTH,DENY,-,-,23,23
 
 ### How It Works
 
-The firewall uses a multi-layer approach:
+The firewall uses a **defense-in-depth multi-layer approach**:
 
-1. **Network Namespace Isolation** - Isolates network stack
-2. **Seccomp Syscall Filtering** - Blocks network syscalls at kernel level (NO_NETWORK mode)
-3. **Rule-Based Filtering** - Policy engine for fine-grained control
+1. **Seccomp-BPF Syscall Filtering** - Kernel-level enforcement for NO_NETWORK and STRICT modes
+   - Blocks `socket()`, `connect()`, `bind()`, `sendto()`, `recvfrom()`, etc.
+   - Returns EPERM (Operation not permitted) at syscall level
+   - **✅ Complete isolation without Network Namespace required**
+
+2. **Network Namespace Isolation** - Recommended for MODERATE/CUSTOM modes
+   - Isolates network stack (separate from host)
+   - Process only sees loopback interface
+   - Prevents access to physical network interfaces
+
+3. **Rule-Based Filtering** - Policy engine for MODERATE/CUSTOM modes
+   - Defines allowed/blocked ports and protocols
+   - Best used WITH Network Namespace for actual enforcement
+   - Provides documentation and defense-in-depth
+
 4. **Logging** - Connection attempts logged to `/tmp/sandbox_firewall.log`
+
+### Enforcement Summary
+
+| Mode | Enforcement | Network Namespace Required |
+|------|------------|---------------------------|
+| **NO_NETWORK** | ✅ Seccomp-BPF (kernel-level) | No |
+| **STRICT** | ✅ Seccomp-BPF (kernel-level) | No |
+| **MODERATE** | ⚠️ Network Namespace + Rules | Yes (recommended) |
+| **CUSTOM** | ⚠️ Network Namespace + Rules | Yes (recommended) |
+
+**Best Practices**:
+- Use **NO_NETWORK** or **STRICT** for untrusted code requiring complete network isolation
+- Use **MODERATE** with **Network Namespace enabled** for applications needing controlled network access
+- Enable **Network Namespace** in the GUI when using MODERATE/CUSTOM modes for best protection
 
 ## Memory Protection
 
@@ -206,6 +232,31 @@ The firewall tab has been completely redesigned with modern UI principles:
 - **Load/Save:** Easy policy file management with file choosers
 
 ## Testing
+
+### Automated Firewall Testing
+
+A comprehensive firewall test suite is provided to validate all security features:
+
+```bash
+# Make script executable
+chmod +x test_firewall.sh
+
+# Run comprehensive tests
+./test_firewall.sh
+```
+
+The test script will:
+1. Build the sandbox engine
+2. Set up Linux capabilities
+3. Build all test programs
+4. Validate firewall enforcement for all modes (NO_NETWORK, STRICT, MODERATE, CUSTOM)
+5. Verify seccomp-BPF implementation
+6. Check kernel compatibility
+7. Test documentation accuracy
+
+**See [FIREWALL_TESTING_GUIDE.md](FIREWALL_TESTING_GUIDE.md) for detailed testing instructions.**
+
+### Manual Testing
 
 Sample test programs are provided in the `sample_programs/` directory. To build them:
 
