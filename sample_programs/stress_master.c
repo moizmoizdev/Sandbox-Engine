@@ -26,6 +26,10 @@
 #include <errno.h>
 #include <signal.h>
 #include <ctype.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 
 /* Configuration structure */
 typedef struct {
@@ -58,6 +62,8 @@ void show_configuration(const StressConfig *config);
 int confirm_execution(void);
 void execute_stress_test(const StressConfig *config);
 void signal_handler(int sig);
+void run_landlock_tests(void);
+void run_network_tests(void);
 
 /* ============================================================================
  * UTILITY FUNCTIONS
@@ -291,6 +297,131 @@ void print_resource_stats(void) {
 }
 
 /* ============================================================================
+ * SANDBOX FEATURE TESTS (LANDLOCK + NETWORK)
+ * ========================================================================== */
+
+void wait_for_enter(void) {
+    printf("\n  Press Enter to continue...");
+    fflush(stdout);
+    getchar();
+}
+
+void run_landlock_tests(void) {
+    clear_screen();
+    printf("  🔒 LANDLOCK FILE ACCESS TESTS\n");
+    print_separator();
+    printf("\n");
+    printf("  These tests try to access files in different locations.\n");
+    printf("  Run this program INSIDE your sandbox with different Landlock\n");
+    printf("  policies (Disabled / Strict / Moderate / Permissive) and compare.\n\n");
+
+    /* Test 1: write in /tmp (should be allowed when Landlock enabled in our engine) */
+    const char *tmp_path = "/tmp/stress_landlock_tmp.txt";
+    printf("  [Test 1] Writing to %s ...\n", tmp_path);
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        const char *msg = "Landlock test: /tmp write OK\n";
+        ssize_t w = write(fd, msg, strlen(msg));
+        close(fd);
+        if (w >= 0) {
+            printf("    ✅ Success (write allowed)\n");
+        } else {
+            printf("    ⚠️  open() succeeded but write() failed: %s\n", strerror(errno));
+        }
+    } else {
+        printf("    ❌ Failed: %s\n", strerror(errno));
+    }
+
+    /* Test 2: write in /etc (should fail with Landlock enabled) */
+    const char *etc_test = "/etc/stress_landlock_test.txt";
+    printf("\n  [Test 2] Writing to %s ...\n", etc_test);
+    fd = open(etc_test, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        printf("    ⚠️  Unexpected success: write to /etc allowed (Landlock likely DISABLED)\n");
+        close(fd);
+    } else {
+        printf("    ✅ Expected failure (errno=%d: %s)\n", errno, strerror(errno));
+    }
+
+    /* Test 3: read /etc/passwd (may be allowed in Moderate/Permissive, blocked in Strict) */
+    const char *etc_passwd = "/etc/passwd";
+    printf("\n  [Test 3] Reading %s ...\n", etc_passwd);
+    fd = open(etc_passwd, O_RDONLY);
+    if (fd >= 0) {
+        char buf[64];
+        ssize_t r = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+        if (r > 0) {
+            buf[r] = '\0';
+            printf("    ✅ Success, first bytes:\n");
+            printf("    \"%.*s\"\n", (int)r, buf);
+        } else {
+            printf("    ⚠️  open() succeeded but read() failed: %s\n", strerror(errno));
+        }
+    } else {
+        printf("    ❌ Failed to open: errno=%d (%s)\n", errno, strerror(errno));
+    }
+
+    printf("\n  Notes:\n");
+    printf("   • With Landlock DISABLED: all three tests usually succeed.\n");
+    printf("   • With Landlock STRICT:  /etc writes should fail; /etc/passwd may be blocked.\n");
+    printf("   • With MODERATE/PERMISSIVE: /tmp writes allowed; /etc writes blocked; reads\n");
+    printf("     from /etc/passwd may be allowed depending on policy.\n");
+
+    print_separator();
+    wait_for_enter();
+}
+
+void run_network_tests(void) {
+    clear_screen();
+    printf("  🌐 NETWORK ACCESS TESTS\n");
+    print_separator();
+    printf("\n");
+    printf("  This will try to open a TCP connection to 1.1.1.1:80.\n");
+    printf("  Run with different firewall policies / network namespace settings in\n");
+    printf("  your sandbox engine (Disabled / No Network / Strict / Custom).\n\n");
+
+    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0) {
+        printf("  ❌ socket() failed: %s\n", strerror(errno));
+        print_separator();
+        wait_for_enter();
+        return;
+    }
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(80);
+    if (inet_pton(AF_INET, "1.1.1.1", &addr.sin_addr) != 1) {
+        printf("  ❌ inet_pton failed\n");
+        close(sockfd);
+        print_separator();
+        wait_for_enter();
+        return;
+    }
+
+    printf("  [Test] Connecting to 1.1.1.1:80 ...\n");
+    if (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+        printf("    ✅ Connection succeeded (network allowed)\n");
+    } else {
+        printf("    ❌ connect() failed: errno=%d (%s)\n", errno, strerror(errno));
+        printf("       This is EXPECTED when network namespace or firewall blocks traffic.\n");
+    }
+
+    close(sockfd);
+
+    printf("\n  Notes:\n");
+    printf("   • With network namespace DISABLED and firewall PERMISSIVE, this will likely\n");
+    printf("     succeed if your host has internet access.\n");
+    printf("   • With network namespace ENABLED and/or firewall STRICT/No Network, the\n");
+    printf("     connect() call should fail (ENETUNREACH, EACCES, etc.).\n");
+
+    print_separator();
+    wait_for_enter();
+}
+
+/* ============================================================================
  * MENU & CONFIGURATION
  * ========================================================================== */
 
@@ -316,6 +447,7 @@ void print_menu(void) {
     printf("  7. Show Current Configuration\n");
     printf("  8. Run Stress Test\n");
     printf("  9. Reset Configuration\n");
+    printf(" 10. Sandbox Feature Tests (Landlock + Network)\n");
     printf("  0. Exit\n");
     print_separator();
 }
@@ -713,7 +845,7 @@ int main() {
         print_banner();
         print_menu();
         
-        choice = read_int("Enter choice", 0, 9, 0);
+        choice = read_int("Enter choice", 0, 10, 0);
         
         switch (choice) {
             case 1:
@@ -750,6 +882,11 @@ int main() {
                 config.cpu_intensity = 5;
                 printf("\n  ✅ Configuration reset\n");
                 sleep(1);
+                break;
+            case 10:
+                /* Run sandbox feature tests without touching main stress config */
+                run_landlock_tests();
+                run_network_tests();
                 break;
             case 0:
                 printf("\n  👋 Goodbye!\n\n");
