@@ -54,8 +54,13 @@ static int is_absolute_path(const char *path) {
  */
 int landlock_is_available(void) {
     struct landlock_ruleset_attr attr = {
-        .handled_access_fs = LANDLOCK_ACCESS_FS_EXECUTE |
-                             LANDLOCK_ACCESS_FS_WRITE_FILE |
+        /* NOTE:
+         * We intentionally DO NOT include LANDLOCK_ACCESS_FS_EXECUTE here.
+         * This avoids execve() getting blocked when the binary or its
+         * interpreter (dynamic linker) paths are not perfectly covered by
+         * our rules. We still enforce strong restrictions on reads/writes.
+         */
+        .handled_access_fs = LANDLOCK_ACCESS_FS_WRITE_FILE |
                              LANDLOCK_ACCESS_FS_READ_FILE |
                              LANDLOCK_ACCESS_FS_READ_DIR |
                              LANDLOCK_ACCESS_FS_REMOVE_DIR |
@@ -292,8 +297,19 @@ int landlock_apply(LandlockConfig *config) {
         close(path_fd);
         
         if (ret < 0) {
+            int err = errno;
             fprintf(stderr, "Warning: Failed to add Landlock rule for %s: %s\n",
-                    config->rules[i].path, strerror(errno));
+                    config->rules[i].path, strerror(err));
+            
+            /* Some paths (like regular files instead of directories) are not valid
+             * for LANDLOCK_RULE_PATH_BENEATH and cause EINVAL/ENOTDIR/ENOENT.
+             * Treat these as non-fatal: skip this rule but keep applying others.
+             */
+            if (err == EINVAL || err == ENOTDIR || err == ENOENT) {
+                continue; /* Skip invalid rule, but don't abort the whole ruleset */
+            }
+            
+            /* For other errors, abort applying Landlock to avoid half-broken policy */
             close(ruleset_fd);
             return -1;
         }
