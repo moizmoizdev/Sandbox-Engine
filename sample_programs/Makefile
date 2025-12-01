@@ -10,7 +10,13 @@ PROGRAMS = hello cpu_intensive memory_test infinite_loop file_operations \
 SECURITY_PROGRAMS = stack_test mmap_exec_test mprotect_test network_connect \
                     syscall_test print_info file_access_test
 
-ALL_PROGRAMS = $(PROGRAMS) $(SECURITY_PROGRAMS)
+# Internet connectivity test programs
+NETWORK_PROGRAMS = test_internet simple_ping
+
+# Simple test programs (no network dependencies)
+SIMPLE_PROGRAMS = ../test_sandbox_simple
+
+ALL_PROGRAMS = $(PROGRAMS) $(SECURITY_PROGRAMS) $(NETWORK_PROGRAMS) $(SIMPLE_PROGRAMS)
 
 .PHONY: all clean security_tests
 

@@ -288,9 +288,216 @@ static int firewall_apply_strict_filter(void) {
 }
 
 /**
+ * Check if iptables is available on the system
+ */
+static int is_iptables_available(void) {
+    /* Try to find iptables in common locations */
+    if (access("/usr/sbin/iptables", X_OK) == 0) return 1;
+    if (access("/sbin/iptables", X_OK) == 0) return 1;
+    if (access("/usr/bin/iptables", X_OK) == 0) return 1;
+    
+    /* Try to execute iptables --version */
+    int ret = system("iptables --version >/dev/null 2>&1");
+    return (ret == 0);
+}
+
+/**
+ * Apply iptables rules for IP/port-level filtering
+ * This works inside a network namespace to provide real packet filtering
+ */
+static int firewall_apply_iptables_rules(FirewallConfig *config) {
+    if (!config || config->rule_count == 0) {
+        printf("  No iptables rules to apply\n");
+        return 0;
+    }
+    
+    /* Check if iptables is available */
+    if (!is_iptables_available()) {
+        printf("  ⚠️  iptables not found - IP filtering disabled\n");
+        printf("  → Install iptables: sudo apt-get install iptables\n");
+        printf("  → Rules will be stored but not enforced\n");
+        return -1;
+    }
+    
+    /* First, flush existing rules and set default policies */
+    printf("  Configuring iptables for IP/port filtering...\n");
+    
+    /* Set default policies to DROP for security */
+    system("/usr/sbin/iptables -P INPUT DROP 2>/dev/null || /sbin/iptables -P INPUT DROP 2>/dev/null || iptables -P INPUT DROP 2>/dev/null");
+    system("/usr/sbin/iptables -P OUTPUT DROP 2>/dev/null || /sbin/iptables -P OUTPUT DROP 2>/dev/null || iptables -P OUTPUT DROP 2>/dev/null");
+    system("/usr/sbin/iptables -P FORWARD DROP 2>/dev/null || /sbin/iptables -P FORWARD DROP 2>/dev/null || iptables -P FORWARD DROP 2>/dev/null");
+    
+    /* Always allow loopback */
+    system("/usr/sbin/iptables -A INPUT -i lo -j ACCEPT 2>/dev/null || /sbin/iptables -A INPUT -i lo -j ACCEPT 2>/dev/null || iptables -A INPUT -i lo -j ACCEPT 2>/dev/null");
+    system("/usr/sbin/iptables -A OUTPUT -o lo -j ACCEPT 2>/dev/null || /sbin/iptables -A OUTPUT -o lo -j ACCEPT 2>/dev/null || iptables -A OUTPUT -o lo -j ACCEPT 2>/dev/null");
+    
+    /* Allow established connections (important for response packets) */
+    system("/usr/sbin/iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || /sbin/iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null");
+    system("/usr/sbin/iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || /sbin/iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null || iptables -A OUTPUT -m state --state ESTABLISHED,RELATED -j ACCEPT 2>/dev/null");
+    
+    int rules_applied = 0;
+    
+    /* Apply each configured rule */
+    for (int i = 0; i < config->rule_count; i++) {
+        FirewallRule *rule = &config->rules[i];
+        if (!rule->enabled) continue;
+        
+        /* Build iptables command based on rule */
+        char cmd[1024];
+        char chain[16];
+        char action[16];
+        char proto[16] = "";
+        char ip_spec[128] = "";
+        char port_spec[128] = "";
+        
+        /* Determine chain based on direction */
+        if (rule->direction == DIR_INBOUND) {
+            strcpy(chain, "INPUT");
+        } else if (rule->direction == DIR_OUTBOUND) {
+            strcpy(chain, "OUTPUT");
+        } else {
+            /* DIR_BOTH: apply to both chains */
+            strcpy(chain, "INPUT");
+        }
+        
+        /* Determine action */
+        if (rule->action == ACTION_ALLOW) {
+            strcpy(action, "ACCEPT");
+        } else if (rule->action == ACTION_DENY) {
+            strcpy(action, "DROP");
+        } else {
+            /* ACTION_LOG: log and accept */
+            strcpy(action, "LOG --log-prefix \"FW: \"");
+        }
+        
+        /* Protocol specification */
+        if (rule->protocol == PROTO_TCP) {
+            strcpy(proto, "-p tcp");
+        } else if (rule->protocol == PROTO_UDP) {
+            strcpy(proto, "-p udp");
+        } else if (rule->protocol == PROTO_ICMP) {
+            strcpy(proto, "-p icmp");
+        }
+        /* PROTO_ALL: no protocol specification */
+        
+        /* IP address filtering */
+        if (rule->has_ip_filter) {
+            char ip_str[INET_ADDRSTRLEN];
+            char mask_str[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &rule->ip_addr, ip_str, sizeof(ip_str));
+            inet_ntop(AF_INET, &rule->ip_mask, mask_str, sizeof(mask_str));
+            
+            /* Convert mask to CIDR notation */
+            int cidr = 0;
+            uint32_t mask = ntohl(rule->ip_mask.s_addr);
+            while (mask) {
+                cidr += mask & 1;
+                mask >>= 1;
+            }
+            
+            if (rule->direction == DIR_INBOUND) {
+                snprintf(ip_spec, sizeof(ip_spec), "-s %s/%d", ip_str, cidr);
+            } else {
+                snprintf(ip_spec, sizeof(ip_spec), "-d %s/%d", ip_str, cidr);
+            }
+        }
+        
+        /* Port filtering (only for TCP/UDP) */
+        if (rule->has_port_filter && (rule->protocol == PROTO_TCP || rule->protocol == PROTO_UDP)) {
+            if (rule->port_start == rule->port_end) {
+                snprintf(port_spec, sizeof(port_spec), "--dport %d", rule->port_start);
+            } else {
+                snprintf(port_spec, sizeof(port_spec), "--dport %d:%d", 
+                        rule->port_start, rule->port_end);
+            }
+        }
+        
+        /* Build and execute iptables command */
+        snprintf(cmd, sizeof(cmd), "/usr/sbin/iptables -A %s %s %s %s -j %s 2>/dev/null || /sbin/iptables -A %s %s %s %s -j %s 2>/dev/null || iptables -A %s %s %s %s -j %s 2>/dev/null",
+                chain, proto, ip_spec, port_spec, action,
+                chain, proto, ip_spec, port_spec, action,
+                chain, proto, ip_spec, port_spec, action);
+        
+        if (system(cmd) == 0) {
+            printf("  ✓ Applied: %s\n", rule->name);
+            rules_applied++;
+        } else {
+            fprintf(stderr, "  ✗ Failed: %s\n", rule->name);
+        }
+        
+        /* If DIR_BOTH, also apply to OUTPUT chain */
+        if (rule->direction == DIR_BOTH) {
+            /* Swap source/dest for OUTPUT chain */
+            if (rule->has_ip_filter) {
+                char ip_str[INET_ADDRSTRLEN];
+                char mask_str[INET_ADDRSTRLEN];
+                inet_ntop(AF_INET, &rule->ip_addr, ip_str, sizeof(ip_str));
+                
+                int cidr = 0;
+                uint32_t mask = ntohl(rule->ip_mask.s_addr);
+                while (mask) {
+                    cidr += mask & 1;
+                    mask >>= 1;
+                }
+                
+                snprintf(ip_spec, sizeof(ip_spec), "-d %s/%d", ip_str, cidr);
+            }
+            
+            snprintf(cmd, sizeof(cmd), "iptables -A OUTPUT %s %s %s -j %s 2>/dev/null",
+                    proto, ip_spec, port_spec, action);
+            system(cmd);
+        }
+    }
+    
+    printf("  ✓ Applied %d iptables rules\n", rules_applied);
+    
+    /* Log final iptables configuration */
+    log_firewall_event(config, "iptables rules applied successfully");
+    
+    return 0;
+}
+
+/**
+ * Check if we are in a network namespace (different from init)
+ */
+static int is_in_network_namespace(void) {
+    /* Check if /proc/self/ns/net exists and differs from init namespace */
+    char self_ns[256], init_ns[256];
+    ssize_t len1 = readlink("/proc/self/ns/net", self_ns, sizeof(self_ns) - 1);
+    ssize_t len2 = readlink("/proc/1/ns/net", init_ns, sizeof(init_ns) - 1);
+    
+    if (len1 > 0 && len2 > 0) {
+        self_ns[len1] = '\0';
+        init_ns[len2] = '\0';
+        return strcmp(self_ns, init_ns) != 0;
+    }
+    return 0;
+}
+
+/**
  * Apply seccomp filter for MODERATE/CUSTOM modes based on configured rules
  */
 static int firewall_apply_moderate_filter(FirewallConfig *config) {
+    /* Check if we're in a network namespace for iptables support */
+    int in_netns = is_in_network_namespace();
+    
+    if (in_netns) {
+        printf("✓ Network namespace detected - using iptables for IP/port filtering\n");
+        
+        /* Apply iptables rules for granular IP/port control */
+        if (firewall_apply_iptables_rules(config) < 0) {
+            fprintf(stderr, "Warning: Failed to apply iptables rules\n");
+            return -1;
+        }
+        
+        return 0;
+    }
+    
+    /* No network namespace - fall back to old seccomp-based logic */
+    printf("⚠ WARNING: Network namespace NOT detected\n");
+    printf("  → IP/port filtering requires network namespace to work properly\n");
+    printf("  → Falling back to coarse-grained seccomp filtering\n\n");
+    
     int has_allow_rules = 0;
     int has_deny_rules = 0;
     
@@ -309,37 +516,32 @@ static int firewall_apply_moderate_filter(FirewallConfig *config) {
     int should_block_network = 0;
     
     if (config->policy == FIREWALL_MODERATE) {
-        /* MODERATE: Always allow network, rely on Network Namespace */
-        printf("✓ MODERATE mode: Allowing all network\n");
-        printf("  → For isolation, enable Network Namespace\n");
+        /* MODERATE: Allow network syscalls (iptables would filter) */
+        printf("✓ MODERATE mode: Allowing network syscalls\n");
+        printf("  → Enable Network Namespace for iptables filtering\n");
         should_block_network = 0;
         
     } else if (config->policy == FIREWALL_CUSTOM) {
         /* CUSTOM: Behavior depends on rules */
         if (config->rule_count == 0) {
             /* No rules = allow all */
-            printf("✓ CUSTOM mode: No rules configured, allowing all network\n");
-            printf("  → Add rules or enable Network Namespace for protection\n");
+            printf("✓ CUSTOM mode: No rules, allowing all network\n");
             should_block_network = 0;
             
         } else if (has_allow_rules && !has_deny_rules) {
             /* Only ALLOW rules = deny-by-default (whitelist) */
             printf("✓ CUSTOM mode: ALLOW rules (deny-by-default)\n");
-            printf("  → Blocking ALL network at kernel level\n");
-            printf("  → Use Network Namespace to enable allowed connections\n");
+            printf("  → Blocking network syscalls (enable netns for granular control)\n");
             should_block_network = 1;
             
         } else if (has_deny_rules && !has_allow_rules) {
             /* Only DENY rules = allow-by-default (blacklist) */
             printf("✓ CUSTOM mode: DENY rules (allow-by-default)\n");
-            printf("  → Allowing all network, use Network Namespace to block\n");
             should_block_network = 0;
             
         } else {
             /* Both ALLOW and DENY rules = ambiguous, default to block */
-            printf("✓ CUSTOM mode: Mixed ALLOW/DENY rules\n");
-            printf("  → Blocking ALL network (deny-by-default for safety)\n");
-            printf("  → Use Network Namespace for granular control\n");
+            printf("✓ CUSTOM mode: Mixed rules (deny-by-default for safety)\n");
             should_block_network = 1;
         }
     }

@@ -1,0 +1,30 @@
+# IP Filtering Example Policy - Demonstrates per-IP address blocking
+# Format: name,protocol,direction,action,ip,mask,port_start,port_end
+# This policy shows how to allow/deny specific IP addresses and networks
+
+# Allow Google DNS (8.8.8.8) for DNS queries
+Allow Google DNS,UDP,OUTBOUND,ALLOW,8.8.8.8,255.255.255.255,53,53
+
+# Allow CloudFlare DNS (1.1.1.1)
+Allow CloudFlare DNS,UDP,OUTBOUND,ALLOW,1.1.1.1,255.255.255.255,53,53
+
+# Allow connections to a specific web server (example: 93.184.216.34 is example.com)
+Allow Example.com,TCP,OUTBOUND,ALLOW,93.184.216.34,255.255.255.255,80,80
+Allow Example.com HTTPS,TCP,OUTBOUND,ALLOW,93.184.216.34,255.255.255.255,443,443
+
+# Allow entire local network (192.168.0.0/16)
+Allow Local Network,ALL,BOTH,ALLOW,192.168.0.0,255.255.0.0,0,65535
+
+# Allow localhost
+Allow Localhost,ALL,BOTH,ALLOW,127.0.0.1,255.255.255.255,0,65535
+
+# Block a specific malicious IP (example)
+Block Malicious IP,ALL,BOTH,DENY,192.0.2.123,255.255.255.255,0,65535
+
+# Block entire suspicious subnet (example: 203.0.113.0/24)
+Block Suspicious Subnet,ALL,BOTH,DENY,203.0.113.0,255.255.255.0,0,65535
+
+# Note: When using this with CUSTOM mode + Network Namespace:
+# - Rules are enforced by iptables inside the namespace
+# - IP addresses and subnet masks are properly filtered
+# - Default policy is DROP (deny all not explicitly allowed)

@@ -147,6 +147,21 @@ pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *
             }
         }
         
+        /* Configure network interface with internet if network namespace was created */
+        if ((ns_flags & NS_NET)) {
+            /* Wait for parent to setup the veth pair */
+            usleep(500000); /* 500ms - give parent time to create veth */
+            
+            /* Configure our side of the veth interface */
+            pid_t my_pid = getpid();
+            if (configure_veth_inside_namespace(my_pid) < 0) {
+                fprintf(stderr, "Warning: Failed to configure network interface\n");
+                fprintf(stderr, "  Network may not have internet connectivity\n");
+                /* Fall back to loopback-only mode */
+                system("ip link set lo up 2>/dev/null");
+            }
+        }
+        
         /* Apply Landlock file access restrictions */
         if (landlock_config && landlock_config->enabled) {
             printf("Applying Landlock file access restrictions (policy: %s)\n",
@@ -278,6 +293,18 @@ pid_t create_sandboxed_process(const char *file_path, int ns_flags, const char *
             /* Pipe read failed, fall back to original PID */
             fprintf(stderr, "Warning: Failed to read real PID from pipe, monitoring may be inaccurate\n");
             real_pid = pid;
+        }
+    }
+    
+    /* Parent process - setup network with internet if network namespace was requested */
+    if (ns_flags & NS_NET) {
+        /* Wait a moment for child to create namespace */
+        usleep(100000); /* 100ms */
+        
+        /* Setup the host side of veth pair with NAT */
+        if (setup_network_namespace_with_internet(real_pid) < 0) {
+            fprintf(stderr, "Warning: Failed to setup network connectivity\n");
+            fprintf(stderr, "  Sandbox will have limited/no network access\n");
         }
     }
     
@@ -489,6 +516,8 @@ int terminate_process(pid_t pid, int methods) {
     /* === FINAL CHECK === */
     if (kill(pid, 0) != 0 && errno == ESRCH) {
         engine_log("[TERMINATOR] ✅ Target confirmed eliminated\n");
+        /* Cleanup network namespace resources */
+        cleanup_network_namespace(pid);
         return 0;
     }
     
@@ -500,10 +529,14 @@ int terminate_process(pid_t pid, int methods) {
     pid_t result = waitpid(pid, &status, WNOHANG);
     if (result == pid) {
         engine_log("[TERMINATOR] ✅ Zombie reaped successfully\n");
+        /* Cleanup network namespace resources */
+        cleanup_network_namespace(pid);
         return 0;
     }
     
     engine_log("[TERMINATOR] ⚠️  Termination sequence complete (process status unknown)\n");
+    /* Attempt cleanup anyway */
+    cleanup_network_namespace(pid);
     return 0;
 }
 

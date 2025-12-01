@@ -36,6 +36,31 @@ int setup_mount_namespace(void);
 int setup_network_namespace(void);
 
 /**
+ * Setup network namespace with internet connectivity (host side)
+ * Creates veth pair, configures routing, and enables NAT
+ * Call this from the PARENT process after child creates namespace
+ * @param pid Process ID to attach the namespace interface to
+ * @return 0 on success, -1 on error
+ */
+int setup_network_namespace_with_internet(pid_t pid);
+
+/**
+ * Configure veth interface inside the namespace (namespace side)
+ * Call this from INSIDE the network namespace after parent sets up veth
+ * @param pid Process ID (used for naming)
+ * @return 0 on success, -1 on error
+ */
+int configure_veth_inside_namespace(pid_t pid);
+
+/**
+ * Cleanup network namespace resources for a process
+ * Removes veth interfaces and NAT rules
+ * @param pid Process ID whose network resources should be cleaned up
+ * @return 0 on success, -1 on error
+ */
+int cleanup_network_namespace(pid_t pid);
+
+/**
  * Setup UTS namespace isolation (hostname isolation)
  * @param hostname Hostname to set in the new namespace
  * @return 0 on success, -1 on error
