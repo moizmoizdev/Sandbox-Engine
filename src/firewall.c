@@ -607,6 +607,11 @@ int firewall_load_policy(FirewallConfig *config, const char *policy_file) {
         return -1;
     }
     
+    /* Clear existing rules - policy file replaces current config */
+    while (config->rule_count > 0) {
+        firewall_remove_rule(config, 0);
+    }
+    
     char line[512];
     int line_num = 0;
     

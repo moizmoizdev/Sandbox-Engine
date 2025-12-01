@@ -275,15 +275,13 @@ static void on_run_clicked(GtkWidget *widget, gpointer user_data) {
         }
     }
     
-    /* Save custom firewall rules to temp file if configured */
+    /* Save current firewall config to temp file (even if empty) */
     char *temp_policy_file = NULL;
-    if (state->firewall_config && 
-        (state->firewall_policy == FIREWALL_CUSTOM || 
-         state->firewall_policy == FIREWALL_STRICT ||
-         state->firewall_config->rule_count > 0)) {
-        /* Save to temp file */
+    if (state->firewall_config && state->firewall_policy != FIREWALL_DISABLED) {
+        /* Always save current config to ensure rules match GUI state */
         temp_policy_file = g_strdup("/tmp/sandbox_firewall_policy.policy");
         if (firewall_save_policy(state->firewall_config, temp_policy_file) < 0) {
+            fprintf(stderr, "Warning: Failed to save firewall config to temp file\n");
             g_free(temp_policy_file);
             temp_policy_file = NULL;
         }
