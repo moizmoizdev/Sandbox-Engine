@@ -288,40 +288,92 @@ static int firewall_apply_strict_filter(void) {
 }
 
 /**
- * Apply seccomp filter for MODERATE/CUSTOM modes - hybrid enforcement
- * This blocks dangerous network operations while allowing controlled access
+ * Apply seccomp filter for MODERATE/CUSTOM modes based on configured rules
  */
 static int firewall_apply_moderate_filter(FirewallConfig *config) {
-    /* Count DENY rules for dangerous ports */
+    int has_allow_rules = 0;
     int has_deny_rules = 0;
+    
+    /* Count rule types */
     for (int i = 0; i < config->rule_count; i++) {
-        if (config->rules[i].enabled && config->rules[i].action == ACTION_DENY) {
-            has_deny_rules = 1;
-            break;
+        if (config->rules[i].enabled) {
+            if (config->rules[i].action == ACTION_ALLOW) {
+                has_allow_rules = 1;
+            } else if (config->rules[i].action == ACTION_DENY) {
+                has_deny_rules = 1;
+            }
         }
     }
     
-    if (!has_deny_rules) {
-        printf("MODERATE mode: No DENY rules specified, using permissive filter\n");
-        printf("NOTE: For strongest protection, enable Network Namespace isolation\n");
-        return 0;
+    /* Determine enforcement strategy based on policy and rules */
+    int should_block_network = 0;
+    
+    if (config->policy == FIREWALL_MODERATE) {
+        /* MODERATE: Always allow network, rely on Network Namespace */
+        printf("✓ MODERATE mode: Allowing all network\n");
+        printf("  → For isolation, enable Network Namespace\n");
+        should_block_network = 0;
+        
+    } else if (config->policy == FIREWALL_CUSTOM) {
+        /* CUSTOM: Behavior depends on rules */
+        if (config->rule_count == 0) {
+            /* No rules = allow all */
+            printf("✓ CUSTOM mode: No rules configured, allowing all network\n");
+            printf("  → Add rules or enable Network Namespace for protection\n");
+            should_block_network = 0;
+            
+        } else if (has_allow_rules && !has_deny_rules) {
+            /* Only ALLOW rules = deny-by-default (whitelist) */
+            printf("✓ CUSTOM mode: ALLOW rules (deny-by-default)\n");
+            printf("  → Blocking ALL network at kernel level\n");
+            printf("  → Use Network Namespace to enable allowed connections\n");
+            should_block_network = 1;
+            
+        } else if (has_deny_rules && !has_allow_rules) {
+            /* Only DENY rules = allow-by-default (blacklist) */
+            printf("✓ CUSTOM mode: DENY rules (allow-by-default)\n");
+            printf("  → Allowing all network, use Network Namespace to block\n");
+            should_block_network = 0;
+            
+        } else {
+            /* Both ALLOW and DENY rules = ambiguous, default to block */
+            printf("✓ CUSTOM mode: Mixed ALLOW/DENY rules\n");
+            printf("  → Blocking ALL network (deny-by-default for safety)\n");
+            printf("  → Use Network Namespace for granular control\n");
+            should_block_network = 1;
+        }
     }
     
-    /*
-     * Moderate mode strategy:
-     * - Use seccomp to log network attempts (SECCOMP_RET_LOG if supported)
-     * - Rely on Network Namespace for actual isolation
-     * - Provide defense-in-depth approach
-     * 
-     * Note: Full port-based filtering requires eBPF/cBPF with sockaddr parsing,
-     * which is complex. The recommended approach is:
-     * 1. Enable Network Namespace for isolation
-     * 2. Use firewall rules for documentation/logging
-     * 3. Use NO_NETWORK or STRICT for complete blocking
-     */
-    
-    printf("MODERATE mode: Rules configured, best used with Network Namespace\n");
-    printf("For complete network isolation, use NO_NETWORK or STRICT policy\n");
+    /* Apply seccomp filter if we should block */
+    if (should_block_network) {
+        struct sock_filter filter[] = {
+            BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socket, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_connect, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+            BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_bind, 0, 1),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+            BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW)
+        };
+        
+        struct sock_fprog prog = {
+            .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),
+            .filter = filter
+        };
+        
+        if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) < 0) {
+            perror("prctl(PR_SET_NO_NEW_PRIVS)");
+            return -1;
+        }
+        
+        if (syscall(__NR_seccomp, SECCOMP_SET_MODE_FILTER, 0, &prog) < 0) {
+            perror("seccomp");
+            return -1;
+        }
+        
+        printf("  ✓ Seccomp filter installed\n");
+    }
     
     return 0;
 }
@@ -374,28 +426,28 @@ int firewall_apply(FirewallConfig *config) {
                      config->rule_count);
             log_firewall_event(config, log_msg);
             
-            /* Print active rules for user visibility */
-            printf("\n=== Firewall Rules Active (%d rules) ===\n", config->rule_count);
-            for (int i = 0; i < config->rule_count; i++) {
-                if (config->rules[i].enabled) {
-                    const char *action_str = config->rules[i].action == ACTION_ALLOW ? "✓ ALLOW" : "✗ DENY";
-                    const char *proto_str = config->rules[i].protocol == PROTO_TCP ? "TCP" :
-                                           config->rules[i].protocol == PROTO_UDP ? "UDP" : "ALL";
-                    printf("  [%d] %s: %s %s", i, action_str, proto_str, config->rules[i].name);
-                    if (config->rules[i].has_port_filter) {
-                        printf(" port %d", config->rules[i].port_start);
-                        if (config->rules[i].port_end != config->rules[i].port_start) {
-                            printf("-%d", config->rules[i].port_end);
+            /* Print active rules */
+            if (config->rule_count > 0) {
+                printf("\n");
+                printf("═══ Configured Rules (%d) ═══\n", config->rule_count);
+                for (int i = 0; i < config->rule_count; i++) {
+                    if (config->rules[i].enabled) {
+                        const char *action_str = config->rules[i].action == ACTION_ALLOW ? "ALLOW" : "DENY";
+                        const char *proto_str = config->rules[i].protocol == PROTO_TCP ? "TCP" :
+                                               config->rules[i].protocol == PROTO_UDP ? "UDP" : "ALL";
+                        printf("  [%d] %s %s: %s", i, action_str, proto_str, config->rules[i].name);
+                        if (config->rules[i].has_port_filter) {
+                            printf(" (port %d", config->rules[i].port_start);
+                            if (config->rules[i].port_end != config->rules[i].port_start) {
+                                printf("-%d", config->rules[i].port_end);
+                            }
+                            printf(")");
                         }
+                        printf("\n");
                     }
-                    printf("\n");
                 }
+                printf("═══════════════════════════════\n\n");
             }
-            printf("=====================================\n\n");
-            
-            printf("ⓘ IMPORTANT: MODERATE/CUSTOM modes provide rule-based filtering.\n");
-            printf("  For strongest isolation, enable Network Namespace in the Namespaces tab.\n");
-            printf("  Network Namespace + Firewall = Defense in Depth\n\n");
             break;
             
         case FIREWALL_DISABLED:
