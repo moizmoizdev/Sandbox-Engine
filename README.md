@@ -2,19 +2,21 @@
 
 A sandboxing engine built entirely in C that securely isolates and monitors user processes using Linux kernel features.
 
-**📋 See [ROADMAP.md](ROADMAP.md) for detailed project timeline and implementation plan.**
+**📋 See [COMPLETE_ARCHITECTURE_GUIDE.md](COMPLETE_ARCHITECTURE_GUIDE.md) and [INTERNET_CONNECTIVITY_GUIDE.md](INTERNET_CONNECTIVITY_GUIDE.md) for detailed architecture and networking implementation.**
 
 ## Features
 
-- **Process Isolation:** Using Linux namespaces (PID, Mount, Network, UTS)
-- **Network Firewall:** Multi-layer firewall with seccomp-based syscall filtering and enhanced GUI
+- **Process Isolation:** Linux namespaces (PID, Mount, Network, UTS)
+- **Network Firewall:** Seccomp-based syscall filtering; iptables IP/port filtering inside network namespaces
+- **Internet Connectivity:** veth + NAT with iptables for packet-level filtering
+- **File Access Control:** Landlock LSM policies (strict/moderate/permissive/custom)
 - **Memory Protection:** W^X enforcement, stack size limits, executable memory restrictions
 - **Policy Management:** Pre-defined and custom firewall policies with improved interface
 - **Real-time Monitoring:** GTK 4 interface for process control and resource monitoring
 - **Syscall Tracking:** Real-time syscall monitoring and statistics
 - **Resource Control:** Cgroups integration with CPU, memory, and process limits
 - **Interactive Controls:** Modern GUI with enhanced file selection, policy loading, and process management
-- **Comprehensive Testing:** Extensive test suite for security feature validation
+- **Comprehensive Testing:** Automated test runner and scripts for firewall and connectivity validation
 
 ## Building
 
@@ -24,11 +26,15 @@ A sandboxing engine built entirely in C that securely isolates and monitors user
 - pkg-config (for finding library dependencies)
 - GTK 4 development libraries
 - WebKitGTK 6.0 development libraries
+- iproute2 and iptables (required for network namespace internet and IP filtering)
+- netfilter-persistent (optional, for persisting iptables rules)
+- setcap/getcap (optional; used by setup_capabilities.sh)
+- Linux kernel: seccomp (3.5+), Landlock (5.13+ for file access control)
 
 On Ubuntu/Debian:
 ```bash
 sudo apt-get update
-sudo apt-get install build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev
+sudo apt-get install -y build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev iproute2 iptables netfilter-persistent
 ```
 
 **Troubleshooting Installation Issues:**
@@ -294,7 +300,7 @@ This will create several test programs:
 
 ### Testing Scenarios
 
-**📋 For comprehensive testing instructions, see [TESTING_GUIDE.md](TESTING_GUIDE.md)**
+**📋 For detailed testing and connectivity diagnostics, see [INTERNET_CONNECTIVITY_GUIDE.md](INTERNET_CONNECTIVITY_GUIDE.md) and use `run_firewall_tests.sh`**
 
 #### Testing Firewall
 
@@ -328,32 +334,33 @@ You can select any of these programs using the "Select File" button in the GUI.
 ```
 Sandbox-Engine/
 ├── src/                    # Source files
-│   ├── main.c             # GTK GUI application with enhanced interface
-│   ├── sandbox.c/h        # Core sandbox functionality
-│   ├── process_control.c/h # Process management with memory protection
-│   ├── namespaces.c/h     # Linux namespace isolation
-│   ├── firewall.c/h       # Network firewall system
-│   ├── memory_protection.c/h # Memory protection and W^X enforcement
-│   ├── cgroups.c/h        # Resource control via cgroups
-│   ├── monitoring.c/h     # Process monitoring and statistics
-│   └── syscall_tracking.c/h # Real-time syscall tracking
-├── policies/              # Firewall policy files
+│   ├── main.c              # GTK GUI application
+│   ├── sandbox.c/h         # Core sandbox functionality
+│   ├── process_control.c/h # Process creation, namespaces, firewall, cgroups, Landlock
+│   ├── namespaces.c/h      # Linux namespace isolation + veth/NAT setup
+│   ├── firewall.c/h        # Seccomp + iptables firewall system
+│   ├── memory_protection.c/h # W^X enforcement and stack limits
+│   ├── cgroups.c/h         # Resource control via cgroups
+│   ├── monitor.c/h         # Process monitoring and statistics
+│   ├── syscall_tracker.c/h # Real-time syscall tracking
+│   └── landlock.c/h        # File access control (Landlock LSM)
+├── policies/               # Firewall policy files
 │   ├── strict.policy
 │   ├── moderate.policy
-│   └── web_only.policy
-├── sample_programs/       # Test programs for sandboxing
-│   ├── Makefile          # Build file for test programs
-│   ├── Basic tests: hello, cpu_intensive, memory_test, etc.
-│   ├── Security tests: stack_test, mmap_exec_test, mprotect_test
-│   ├── Network tests: network_connect, http_request, dns_lookup
-│   └── Info test: print_info
-├── docs/                  # Documentation
-├── obj/                   # Object files (generated)
-├── main                   # Main executable (generated)
-├── Makefile              # Build configuration
-├── README.md             # This file
-├── TESTING_GUIDE.md      # Comprehensive testing instructions
-└── ROADMAP.md            # Development roadmap
+│   ├── web_only.policy
+│   └── ip_filtering_example.policy
+├── sample_programs/        # Test programs for sandboxing
+│   ├── Makefile            # Build file for test programs
+│   ├── Basic, Network, Security, Info tests
+├── docs/                   # Documentation
+│   └── NAMESPACES_EXPLAINED.md
+├── COMPLETE_ARCHITECTURE_GUIDE.md
+├── IMPLEMENTATION_SUMMARY.md
+├── INTERNET_CONNECTIVITY_GUIDE.md
+├── obj/                    # Object files (generated)
+├── main                    # Main executable (generated)
+├── Makefile                # Build configuration
+└── README.md               # This file
 ```
 
 ## Recent Updates
